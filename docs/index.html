@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Check EDI Quality</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;600;700&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<style>
+  :root {
+    --navy: #1f3864; --navy-soft: #d9e1f2; --bg: #f3f5f9; --card: #ffffff;
+    --text: #1d2433; --muted: #5b6474; --line: #d5dae3; --stripe: #f7f9fc;
+    --red: #c00000; --red-bg: #fdd7d7; --green: #006100; --green-bg: #c6efce; --yellow: #fff2cc; --orange: #fce4d6;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: "Sarabun", Tahoma, sans-serif; background: var(--bg); color: var(--text); }
+  header { background: var(--navy); color: #fff; padding: 18px 16px; }
+  header .wrap { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
+  header h1 { margin: 0; font-size: 26px; letter-spacing: 1px; }
+  header p { margin: 0; opacity: .8; font-size: 15px; }
+  .wrap { max-width: 1400px; margin: 0 auto; }
+  main { padding: 20px 16px 40px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 18px; margin-bottom: 18px; }
+  .top { display: grid; grid-template-columns: 1fr auto; gap: 14px; align-items: end; }
+  @media (max-width: 720px) { .top { grid-template-columns: 1fr; } }
+  label.t { display: block; font-weight: 600; color: var(--navy); margin-bottom: 6px; }
+  .drop { border: 2px dashed #9aa8c3; border-radius: 8px; padding: 16px; text-align: center; cursor: pointer; background: #fafbfd; transition: .15s; }
+  .drop.over { background: var(--navy-soft); border-color: var(--navy); }
+  .drop b { color: var(--navy); }
+  button { font: inherit; font-weight: 600; font-size: 16px; border: 0; border-radius: 8px; padding: 12px 22px; cursor: pointer; background: var(--navy); color: #fff; }
+  button:disabled { opacity: .4; cursor: not-allowed; }
+  .files { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+  .file { display: inline-flex; align-items: center; gap: 8px; border: 1px solid var(--line); background: #fff; border-radius: 999px; padding: 5px 6px 5px 12px; font-size: 14px; }
+  .file .k { font-size: 12px; font-weight: 700; padding: 1px 8px; border-radius: 999px; }
+  .file .k.MANIFEST { background: var(--navy-soft); color: var(--navy); }
+  .file .k.ENTER { background: #fff2cc; color: #7f6000; }
+  .file .k.NONE { background: var(--red-bg); color: var(--red); }
+  .file .x { cursor: pointer; border: 0; background: #eef0f5; color: var(--muted); border-radius: 50%; width: 22px; height: 22px; padding: 0; font-size: 13px; line-height: 22px; }
+  .opt { margin-top: 12px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; font-size: 14px; color: var(--muted); }
+  .opt input { font: inherit; padding: 6px 10px; border: 1px solid var(--line); border-radius: 8px; width: 110px; }
+  .rules { font-size: 14px; color: var(--muted); margin: 14px 0 0; line-height: 1.7; }
+  .rules code { background: var(--navy-soft); color: var(--navy); padding: 1px 6px; border-radius: 4px; }
+  .msg { color: var(--red); font-weight: 600; margin-top: 10px; white-space: pre-line; }
+  .info { display: flex; flex-wrap: wrap; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; margin-bottom: 14px; }
+  .info div { padding: 8px 14px; border-right: 1px solid var(--line); }
+  .info .k { background: var(--navy-soft); color: var(--navy); font-weight: 700; }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
+  .chip { border-radius: 999px; padding: 6px 14px; font-weight: 700; border: 1px solid rgba(0,0,0,.08); }
+  .chip.bad { background: var(--red-bg); color: var(--red); }
+  .chip.ok { background: var(--green-bg); color: var(--green); }
+  .chip.all { background: var(--navy-soft); color: var(--navy); }
+  .legend { font-size: 13px; color: var(--muted); margin-bottom: 10px; }
+  .legend i { display: inline-block; width: 12px; height: 12px; border: 1px solid #bbb; vertical-align: -1px; margin: 0 4px 0 10px; }
+  .toolbar { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; }
+  .toolbar input[type=search] { font: inherit; padding: 9px 12px; border: 1px solid var(--line); border-radius: 8px; min-width: 240px; flex: 1; }
+  .toolbar label { display: flex; gap: 6px; align-items: center; cursor: pointer; user-select: none; }
+  .tbl { overflow: auto; max-height: 72vh; border: 1px solid var(--line); border-radius: 8px; }
+  table { border-collapse: separate; border-spacing: 0; width: 100%; font-size: 13px; }
+  th { background: var(--navy); color: #fff; padding: 9px 8px; position: sticky; top: 0; z-index: 3; white-space: nowrap; }
+  td { padding: 6px 10px; border-top: 1px solid var(--line); border-right: 1px solid #eef0f5; text-align: left; background: #fff; vertical-align: top; min-width: 90px; max-width: 320px; }
+  td.r { text-align: right; white-space: nowrap; }
+  td.wide { min-width: 260px; }
+  td.ok { background: #fff; }
+  td.diff { background: var(--red-bg) !important; color: #9c0006; font-weight: 700; }
+  td.warn { background: var(--orange) !important; color: #9c0006; font-weight: 700; }
+  td.yel { background: var(--yellow) !important; }
+  td.grn { background: var(--green-bg) !important; color: var(--green); font-weight: 700; }
+  td.navy { background: var(--navy) !important; color: #fff; font-weight: 700; }
+  td.bad { font-weight: 700; }
+  tr.total td { border-top: 3px solid var(--navy); font-weight: 700; }
+  th.s0, td.s0 { position: sticky; left: 0; z-index: 2; min-width: 150px; max-width: 150px; }
+  th.s1, td.s1 { position: sticky; left: 150px; z-index: 2; min-width: 140px; box-shadow: 2px 0 0 var(--line); }
+  th.s0, th.s1 { z-index: 4; }
+  .hidden { display: none; }
+  footer { text-align: center; color: var(--muted); font-size: 13px; padding-bottom: 24px; }
+  footer a { color: var(--navy); }
+</style>
+</head>
+<body>
+<header><div class="wrap"><h1>CHECK EDI QUALITY</h1><p>ตรวจเทียบ MANIFEST กับ ENTER (ฟอร์ม AMENDMENT ของ Quality):CONSIGNEE · CNTR · STATUS · PKG · G.W. · MEAS. · MARKS · DESC · DG · TRANSIT</p></div></header>
+
+<main class="wrap">
+  <section class="card">
+    <div class="top">
+      <div>
+        <label class="t">ไฟล์ MANIFEST (.xls / .xlsx) และ ENTER ฟอร์ม AMENDMENT ของ Quality (.pdf — ได้หลายไฟล์)</label>
+        <div class="drop" id="drop"><span>ลากไฟล์มาวางพร้อมกัน หรือ <b>คลิกเพื่อเลือกไฟล์</b></span></div>
+        <input type="file" id="file" accept=".xls,.xlsx,.pdf" multiple class="hidden">
+        <div class="files" id="files"></div>
+        <div class="opt"><span>SHED NO. ที่แจ้ง (ถ้ามี):</span><input id="shed" placeholder="เช่น 0141" inputmode="numeric"><span>— ทุก B/L ต้องตรงเลขนี้ ยกเว้น LAOS</span></div>
+      </div>
+      <button id="run" disabled>ตรวจสอบ</button>
+    </div>
+    <p class="rules">
+      <b>ข้อจำกัด:</b> หน้านี้รองรับเฉพาะฟอร์ม AMENDMENT ของ Quality (ไฟล์ CNTRS ไม่นำมาเทียบ) ·
+      แยกประเภทไฟล์ให้เองจากนามสกุล (ตั้งชื่ออะไรก็ได้) · ENTER หลายไฟล์ของเรือลำเดียวกันใส่พร้อมกันได้ ·
+      <b>STATUS</b>: CY/CY-CY/FCL/ลากตู้ = <code>CY</code>, LCL/ขน = <code>LCL</code>, CFS/LCL-CFS/เปิดตู้ = <code>LCL/CFS</code> ·
+      <b>MARKS/DESC</b> เทียบเข้ม (ตัดแค่ช่องว่าง/วรรคตอน) · <b>DG / REEFER / TRANSIT</b> พบฝั่งใดก็เตือนเสมอ ·
+      <b>B/L ที่มีใน ENTER แต่ไม่มีใน MANIFEST</b> = วิกฤต<br>
+      ไฟล์ถูกประมวลผลในเบราว์เซอร์ของคุณเท่านั้น ไม่มีการอัปโหลดไปที่ใด
+    </p>
+    <div class="msg" id="msg"></div>
+  </section>
+
+  <section class="card hidden" id="result">
+    <div class="info" id="info"></div>
+    <div class="chips" id="chips"></div>
+    <div class="legend">สี: <i style="background:#fff"></i>ไม่ผิด <i style="background:#c6efce"></i>ผ่าน <i style="background:#fdd7d7"></i>ไม่ตรง ⚠ <i style="background:#fce4d6"></i>ต้องยืนยัน <i style="background:#fff2cc"></i>ไม่มี ENTER เทียบ</div>
+    <div class="toolbar">
+      <input type="search" id="search" placeholder="ค้นหา B/L / ผู้รับ / ตู้ / หมายเหตุ">
+      <label><input type="checkbox" id="onlyBad"> แสดงเฉพาะที่ไม่ตรง</label>
+      <button id="download">ดาวน์โหลด EDI.xlsx</button>
+    </div>
+    <div class="tbl"><table><thead id="thead"></thead><tbody id="tbody"></tbody></table></div>
+  </section>
+</main>
+<footer><a href="https://github.com/Rattanao/check-edi-Quality">github.com/Rattanao/check-edi-Quality</a></footer>
+
+<script src="core.js"></script>
+<script>
+pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+const C = window.CheckQuality;
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+let files = [];   // {name, size, kind, rows|pages}
+let report = null;
+
+// ---------- อ่านไฟล์ (PDF อ่านด้วย C.pdfPages ใน core.js) ----------
+function sheetRows(buf) {
+  const wb = XLSX.read(new Uint8Array(buf), { type: "array" });
+  const ws = wb.Sheets[wb.SheetNames[0]];
+  const ref = XLSX.utils.decode_range(ws["!ref"] || "A1");
+  ref.s.r = 0; ref.s.c = 0;            // นับคอลัมน์/แถวจาก A1 เสมอ ให้ตรงกับตำแหน่งจริงในไฟล์
+  return XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: null, range: ref });
+}
+
+async function addFiles(list) {
+  $("msg").textContent = "";
+  for (const f of list) {
+    if (files.some(x => x.name === f.name && x.size === f.size)) continue;
+    try {
+      const buf = await f.arrayBuffer();
+      if (/cntrs?/i.test(f.name)) files.push({ name: f.name, size: f.size, kind: null });   // ไฟล์ CNTRS ไม่ใช้ในหน้านี้ (ไม่นำมาเทียบ)
+      else if (/\.pdf$/i.test(f.name)) files.push({ name: f.name, size: f.size, kind: "ENTER", pages: await C.pdfPages(pdfjsLib, buf) });
+      else if (/\.xlsx?$/i.test(f.name)) files.push({ name: f.name, size: f.size, kind: "MANIFEST", rows: sheetRows(buf) });
+      else files.push({ name: f.name, size: f.size, kind: null });
+    } catch (err) {
+      $("msg").textContent += `อ่านไฟล์ ${f.name} ไม่ได้: ${err.message}\n`;
+    }
+  }
+  renderFiles();
+}
+
+function renderFiles() {
+  $("files").innerHTML = files.map((f, i) =>
+    `<span class="file">${esc(f.name)} <span class="k ${f.kind || "NONE"}">${f.kind || "ไม่รู้จัก"}</span>` +
+    `<button class="x" data-i="${i}" title="เอาออก">×</button></span>`).join("");
+  const has = k => files.some(f => f.kind === k);
+  $("run").disabled = !(has("MANIFEST") && has("ENTER"));
+}
+
+// ---------- ตรวจ ----------
+function run() {
+  $("msg").textContent = "";
+  try {
+    const mf = files.filter(f => f.kind === "MANIFEST").pop(), enters = files.filter(f => f.kind === "ENTER");
+    const { MAN, vessel, declared, blRe } = C.parseManifest(mf.rows);
+    if (!Object.keys(MAN).length) { $("msg").textContent = "อ่าน B/L จาก MANIFEST ไม่ได้ ตรวจว่าเป็นรายงาน CARGO MANIFEST ของสายเรือ"; return; }
+    const notQ = enters.filter(f => !C.isQualityAmendment(f.pages)).map(f => f.name);
+    if (notQ.length) { $("msg").textContent = "ไฟล์นี้ไม่ใช่ฟอร์ม AMENDMENT ของ Quality (ไม่พบป้าย B/L NO. / CONT.NO. / CONSIGNEE ของฟอร์ม) — หน้านี้รองรับเฉพาะ Quality:\n" + notQ.join("\n"); return; }
+    const { ENT, declared: entDecl } = C.parseEnter(enters.flatMap(f => f.pages), blRe);
+    if (!Object.keys(ENT).length) { $("msg").textContent = "อ่าน B/L จาก ENTER ไม่ได้ — เลข B/L ใน ENTER ไม่ตรงกับรูปแบบเลข B/L ใน MANIFEST"; return; }
+    report = C.buildReport(MAN, ENT, vessel, declared, entDecl, { expectedShed: $("shed").value });
+    renderResult();
+  } catch (err) {
+    $("msg").textContent = "เกิดข้อผิดพลาด: " + err.message;
+    console.error(err);
+  }
+}
+
+function renderResult() {
+  const { rows, count, issueRows, vessel, masterBl, total } = report;
+  const conts = [...new Set(rows.flatMap(r => String(r.cells.cntM.v).split(";")).filter(x => x && x !== "—"))];
+  $("info").innerHTML =
+    `<div class="k">VESSEL</div><div>${esc(vessel || "(ไม่ระบุ)")}</div><div class="k">MASTER B/L</div><div>${esc(masterBl)}</div>` +
+    `<div class="k">CONTAINER</div><div>${esc(conts.join(", ") || "-")}</div>`;
+  $("chips").innerHTML =
+    `<span class="chip all">ทั้งหมด ${count} B/L</span><span class="chip bad">⚠ ต้องตรวจ ${issueRows}</span><span class="chip ok">✔ ผ่าน ${count - issueRows}</span>` +
+    (total.cells.urgent.s === "grn" ? `<span class="chip ok">ยอดรวมตรงกัน</span>` : `<span class="chip bad">⚠ ยอดรวมไม่ตรง</span>`);
+  $("thead").innerHTML = "<tr>" + C.HEADERS.map((h, i) => `<th class="${i < 2 ? "s" + i : ""}">${esc(h)}</th>`).join("") + "</tr>";
+  drawRows();
+  $("result").classList.remove("hidden");
+}
+
+function tr(r, cls) {
+  return `<tr class="${cls || ""}">` + C.KEYS.map((k, j) => {
+    const c = r.cells[k];
+    const cl = [c.s, c.bad ? "bad" : "", C.NUMKEYS.has(k) ? "r" : "", C.WIDEKEYS.has(k) || k === "note" || k === "urgent" ? "wide" : "", j < 2 ? "s" + j : ""].join(" ").trim();
+    return `<td class="${cl}">${esc(c.v)}</td>`;
+  }).join("") + "</tr>";
+}
+
+function drawRows() {
+  const q = $("search").value.trim().toLowerCase(), only = $("onlyBad").checked;
+  const shown = report.rows.filter(r => {
+    if (only && !r.bad) return false;
+    return !q || C.KEYS.map(k => r.cells[k].v).join(" ").toLowerCase().includes(q);
+  });
+  $("tbody").innerHTML = shown.map(r => tr(r)).join("") + tr(report.total, "total");
+}
+
+// ---------- ส่งออก Excel (หน้าตาเดียวกับ build_edi.py) ----------
+async function download() {
+  const { rows, total, vessel, masterBl } = report;
+  const wb = new ExcelJS.Workbook();
+  const ws = wb.addWorksheet("EDI", { views: [{ state: "frozen", xSplit: 2, ySplit: 4 }] });
+  const NC = C.KEYS.length;
+  const FN = "Aptos Narrow", FS = 9;
+  const fill = c => ({ type: "pattern", pattern: "solid", fgColor: { argb: "FF" + c } });
+  const thin = { style: "thin", color: { argb: "FFBFBFBF" } };
+  const box = { left: thin, right: thin, top: thin, bottom: thin };
+  const FILL = { ok: "FFFFFF", diff: "FDD7D7", warn: "FCE4D6", yel: "FFF2CC", grn: "C6EFCE", navy: "1F4E78" };
+
+  ws.mergeCells(1, 1, 1, NC);
+  ws.getCell(1, 1).value = "รายงานตรวจสอบเอกสารขาเข้าเรือ  EDI  —  เทียบ ENTER (เอกสารลูกค้า) กับ MANIFEST (สายเรือ)  |  จุดสำคัญที่มีผลกับใบขนสินค้าขาเข้า";
+  ws.getCell(1, 1).font = { name: FN, size: FS, bold: true };
+  ws.mergeCells(2, 1, 2, NC);
+  const c2 = ws.getCell(2, 1);
+  c2.value = `Vessel ${vessel || "(ไม่ระบุ)"} | Master B/L ${masterBl}`;
+  c2.font = { name: FN, size: FS, bold: true, color: { argb: "FF000000" } };
+  c2.alignment = { wrapText: true, vertical: "middle" };
+  ws.mergeCells(3, 1, 3, NC);
+  const c3 = ws.getCell(3, 1);
+  c3.value = "สี: ขาว=ไม่ผิด | เขียว=ผ่าน (ช่องสรุป) | แดง ⚠=ไม่ตรง/จุดเร่งด่วน | ส้ม=ต้องยืนยัน | เหลือง=ไม่มี ENTER เทียบ    ||    " +
+    "STATUS: CY,CY/CY,FCL,ลากตู้=CY ; LCL,ขน(ส่ง)=LCL ; CFS,LCL/CFS,เปิดตู้=LCL/CFS    ||    " +
+    (report.expectedShed ? `SHED NO.: ต้องเป็น ${report.expectedShed} ทุก B/L (ตรง = -) ยกเว้น LAOS=0124 (DISCHARGE BANGKOK)    ||    `
+      : "SHED NO.: USED ENGINE/LAOS=0126/0124 (เฉพาะ DISCHARGE BANGKOK), DG=2826 (เฉพาะ LAEM CHABANG), THLKR/BMT/SCT/UNITHAI=0332/0110/0302/0113    ||    ") +
+    "CARGO MOVEMENT: TRANSIT ต้องเป็น (7-TRANSIT) เสมอ ยกเว้นไปลาวต้องตรงกับ ENTER เท่านั้น";
+  c3.font = { name: FN, size: FS, bold: true, color: { argb: "FFB00000" } };
+  c3.alignment = { wrapText: true, vertical: "middle" };
+  ws.getRow(2).height = 18; ws.getRow(3).height = 32; ws.getRow(4).height = 30;
+
+  C.HEADERS.forEach((h, j) => {
+    const c = ws.getCell(4, j + 1);
+    c.value = h; c.font = { name: FN, size: FS, bold: true, color: { argb: "FFFFFFFF" } }; c.fill = fill("1F4E78"); c.border = box;
+    c.alignment = { horizontal: "center", vertical: "middle", wrapText: true };
+  });
+  const put = (r, rowObj, isTotal) => {
+    C.KEYS.forEach((k, j) => {
+      const cell = rowObj.cells[k], c = ws.getCell(r, j + 1);
+      c.value = cell.v;
+      c.fill = fill(FILL[cell.s] || "FFFFFF");
+      c.border = isTotal ? { left: thin, right: thin, bottom: thin, top: { style: "medium", color: { argb: "FF1F4E78" } } } : box;
+      let color = "FF000000", bold = isTotal;
+      if (cell.s === "navy") { color = "FFFFFFFF"; bold = true; }
+      else if (cell.s === "grn") { color = "FF006100"; bold = true; }
+      else if (cell.bad) { color = "FFB00000"; bold = true; }
+      c.font = { name: FN, size: FS, bold, color: { argb: color } };
+      c.alignment = { wrapText: true, vertical: isTotal ? "middle" : "top", horizontal: C.NUMKEYS.has(k) ? "right" : "left" };
+    });
+  };
+  rows.forEach((row, i) => { put(5 + i, row, false); ws.getRow(5 + i).height = 26; });
+  const tr_ = 5 + rows.length;
+  put(tr_, total, true);
+  ws.getRow(tr_).height = 99;
+  C.HEADERS.forEach((h, j) => { ws.getColumn(j + 1).width = C.WIDEKEYS.has(C.KEYS[j]) ? 32 : Math.max(h.length + 2, 9); });
+  ws.getColumn(2).width = 14;
+  ws.autoFilter = { from: { row: 4, column: 1 }, to: { row: tr_ - 1, column: NC } };
+  ws.pageSetup = { orientation: "landscape", fitToPage: true, fitToWidth: 1, fitToHeight: 0 };
+
+  const buf = await wb.xlsx.writeBuffer();
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }));
+  a.download = "EDI.xlsx";
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+// ---------- events ----------
+const drop = $("drop");
+drop.onclick = () => $("file").click();
+$("file").onchange = e => { addFiles([...e.target.files]); e.target.value = ""; };
+drop.ondragover = e => { e.preventDefault(); drop.classList.add("over"); };
+drop.ondragleave = () => drop.classList.remove("over");
+drop.ondrop = e => { e.preventDefault(); drop.classList.remove("over"); addFiles([...e.dataTransfer.files]); };
+$("files").onclick = e => { const i = e.target.dataset.i; if (i !== undefined) { files.splice(+i, 1); renderFiles(); } };
+$("run").onclick = run;
+$("search").oninput = () => report && drawRows();
+$("onlyBad").onchange = () => report && drawRows();
+$("download").onclick = download;
+</script>
+</body>
+</html>

@@ -11,7 +11,9 @@ build_edi.py — เทียบ MANIFEST (สายเรือ) กับ ENTE
 
 รูปแบบไฟล์ที่รองรับ (ดู references/format-notes.md ในสกิลนี้สำหรับรายละเอียด):
   MANIFEST.xls  — รายงานอิสระ (free-form) 1 บล็อกต่อ 1 B/L ย่อย
-                  col0=B/L (แถวหัว) / "S :" "C :" "N :" | col5=marks+container
+                  col0=B/L (แถวหัว) / "S :" "C :" "N :" | col5-6=marks+container (เดาอัตโนมัติจาก
+                  แพทเทิร์นเลขตู้ "1. XXXX000000" ด้วย detect_marks_col() — บางไฟล์เลื่อนไป 1 ช่องเพราะ
+                  ขอบเขต merge เซลล์หัวตารางไม่ตรงกับคอลัมน์ข้อมูลจริง)
                   col10=จำนวนหีบห่อ+STATUS+รายละเอียดสินค้า(+DG/REEFER/TRANSIT ถ้ามี)
                   col16=น้ำหนัก(แถวหัว)/ปริมาตร(MTQ)
                   ปรับเลขคอลัมน์ในฟังก์ชัน parse_manifest() ถ้าพบว่าไฟล์คาร์เรียร์อื่นเรียงคอลัมน์ต่างไป
@@ -80,6 +82,175 @@ def extract_transit_phrase(txt):
     return kw
 
 
+# ═══════════════════ 4 กฎเพิ่มเติม: SHED NO. / ประเทศปลายทาง / CARGO MOVEMENT / TAX ID ═══════════════════
+# ทั้ง 4 ค่านี้พิมพ์อยู่คอลัมน์เดียวกัน (col 15 ของ MANIFEST.xls) เป็น 4 บรรทัดต่อ B/L block เรียงกัน:
+#   "1) SHED NO. 0141" / "2) ประเทศปลายทาง (TH)" / "3) CARGO MOVEMENT (7-TRANSIT)" / "4) TAX ID: (ชื่อ)"
+# ดู parse_manifest() ที่ดึงเก็บเป็น rec['shed_no']/rec['dest_code_raw']/rec['movement_raw']/rec['tax_id_raw']
+DEST_CODE = {'LAOS': 'LL', 'LAO PDR': 'LL', 'LAO': 'LL', 'MYANMAR': 'MM', 'CHINA': 'CN',
+             'MALAYSIA': 'MY', 'PHILIPPINES': 'PH', 'CAMBODIA': 'KH',
+             'MARSHALL ISLAND': 'MH', 'MARSHALL ISLANDS': 'MH', 'INDIA': 'IN'}
+LAOS_NAMES = ('LAOS', 'LAO PDR', 'LAO')
+
+
+def find_dest_country(txt):
+    """หาชื่อประเทศปลายทาง (ตามคีย์ของ DEST_CODE) จากประโยค transit/transhipment ของ MANIFEST —
+       คืนสตริงว่างถ้าไม่มีข้อความ transit หรือไม่เจอชื่อประเทศที่รู้จัก."""
+    if not txt:
+        return ''
+    u = txt.upper()
+    for name in sorted(DEST_CODE, key=len, reverse=True):   # ชื่อยาวก่อน กัน 'LAO' บังตัว 'LAO PDR'
+        if name in u:
+            return name
+    return ''
+
+
+# SHED NO. ที่ผู้ใช้แจ้งมาตอนสั่งตรวจ (--shed เช่น 0141) — ถ้ามีค่า ทุก B/L ต้องตรงกับเลขนี้ ยกเว้น LAOS
+# ที่ยังใช้กฎเดิม (0124 เมื่อ DISCHARGE BANGKOK). ถ้าไม่แจ้ง ใช้กฎ 7 หมวดเดิมทั้งหมด
+EXPECTED_SHED = ''
+
+
+def check_shed(port_discharge, has_dg, has_used_engine, dest_country, shed_raw):
+    """กฎ 1) SHED NO. — คืน (ok, expected, label). ok: None=ไม่มีเงื่อนไขต้องตรวจ (ไม่ใช่ 7 หมวดนี้),
+       True/False=ตรง/ไม่ตรง. เฉพาะ 7 หมวดนี้เท่านั้นที่มีเลข SHED บังคับ นอกเหนือจากนี้ไม่ตรวจ.
+       ถ้ามี EXPECTED_SHED (ผู้ใช้แจ้ง) ทุก B/L ที่ไม่ใช่ LAOS ต้องตรงกับเลขนั้นแทน."""
+    pd = (port_discharge or '').upper()
+    m = re.search(r'\d{3,4}', shed_raw or '')
+    actual = m.group(0).zfill(4) if m else ''
+    expected, label = '', ''
+    if EXPECTED_SHED and dest_country not in LAOS_NAMES:
+        return (actual == EXPECTED_SHED), EXPECTED_SHED, 'SHED ที่แจ้ง'
+    if 'THLKR' in pd:
+        expected, label = '0332', 'THLKR'
+    elif 'BMT' in pd:
+        expected, label = '0110', 'BMT'
+    elif 'SCT' in pd:
+        expected, label = '0302', 'SCT'
+    elif 'UNITHAI' in pd:
+        expected, label = '0113', 'UNITHAI'
+    elif 'LAEM CHABANG' in pd and has_dg:
+        expected, label = '2826', 'DG ที่ DISCHARGE LAEM CHABANG'
+    elif 'BANGKOK' in pd and dest_country in LAOS_NAMES:
+        expected, label = '0124', 'LAOS ที่ DISCHARGE BANGKOK'
+    elif 'BANGKOK' in pd and has_used_engine:
+        expected, label = '0126', 'USED ENGINE ที่ DISCHARGE BANGKOK'
+    if not expected:
+        return None, '', ''
+    return (actual == expected), expected, label
+
+
+def check_dest_code(transit_text, dest_code_raw):
+    """กฎ 2) ประเทศปลายทาง (XX) กรณี TRANSIT/TRANSSHIPMENT — คืน (ok, expected_code, actual_code).
+       ok=None ถ้าไม่มีข้อความ transit หรือประเทศปลายทางไม่อยู่ใน DEST_CODE (ไม่รู้ค่าที่ถูกต้อง ไม่ตัดสิน)."""
+    country = find_dest_country(transit_text)
+    if not country:
+        return None, '', ''
+    expected = DEST_CODE.get(country, '')
+    if not expected:
+        return None, '', ''
+    m = re.search(r'\(([A-Za-z]{2})\)', dest_code_raw or '')
+    actual = m.group(1).upper() if m else ''
+    return (actual == expected), expected, actual
+
+
+def check_movement(transit_text, dest_country, movement_manifest_raw, movement_enter_raw):
+    """กฎ 3) CARGO MOVEMENT — คืน (ok, expected_display, actual_code).
+       ok=None: ไม่มี transit เลย (STATUS อื่น เช่น O-OTHER/5-CONSOLIDATE ถือว่าถูกต้องเสมอ ไม่ตรวจ).
+       ok='review': ไปลาว แต่ไม่พบค่า CARGO MOVEMENT ใน ENTER ให้เทียบ — ต้องให้คนตรวจสอบเอง (ส้ม).
+       ไม่ใช่ลาว: ต้องเป็น '7-TRANSIT' เสมอ. ไปลาว: ต้องตรงกับที่ ENTER ระบุ (7 หรือ L) เท่านั้น."""
+    if not transit_text:
+        return None, '', ''
+    mv = (movement_manifest_raw or '').strip().upper()
+    if dest_country in LAOS_NAMES:
+        exp = (movement_enter_raw or '').strip().upper()
+        if not exp:
+            return 'review', '', mv
+        ok = (exp == '7' and mv.startswith('7')) or (exp.startswith('L') and mv.startswith('L'))
+        return ok, f'ตาม ENTER = {exp}', mv
+    ok = mv.startswith('7')
+    return ok, '7-TRANSIT', mv
+
+
+def check_taxid(tax_id_raw, notify_name, enter_notify=None):
+    """กฎ 4) TAX ID: (ชื่อ) ต้องตรงกับ N:/NOTIFY PARTY — คืน (ok, tax_id_name, notify_name).
+       ok=None ถ้าช่อง TAX ID ว่างเปล่า (ไม่มีชื่อให้เทียบเลย, พบบ่อยในไฟล์จริงว่าง '()').
+       ปกติ CNEE./NOTIFY ต้องเหมือนกัน (เทียบกับ N:/NOTIFY PARTY ของ MANIFEST เองเท่านั้น) ยกเว้น B/L ที่
+       เป็น TRANSIT/TRANSHIPMENT — กรณีนั้น NOTIFY ที่ถูกต้องอาจเป็นผู้รับช่วงขนส่งที่ ENTER ระบุแยกไว้เอง
+       (ไม่ใช่ N: ของ MANIFEST) จึงรับ enter_notify มาเทียบเพิ่มด้วย (ผู้เรียกส่งมาเฉพาะตอนมี transit
+       เท่านั้น — ดู compute_extra_checks())."""
+    m = re.search(r'\(([^)]*)\)', tax_id_raw or '')
+    name = (m.group(1) if m else '').strip()
+    if not name:
+        return None, '', notify_name or ''
+    a, b = norm_co(name), norm_co(notify_name or '')
+    ok = bool(a and b and comatch(a, b))
+    if not ok and enter_notify:
+        c = norm_co(enter_notify)
+        if a and c and comatch(a, c):
+            ok = True
+    return ok, name, notify_name or ''
+
+
+def compute_extra_checks(m, e):
+    """เรียก check_shed/check_dest_code/check_movement/check_taxid ให้ครบ 4 ข้อในทีเดียว แปลงผลเป็นข้อความ
+       สำหรับใส่เซลล์รายงาน — คืน dict คีย์ shed/dest/mv/tax แต่ละอันเป็น {'ok':…, 'text':…, 'note':…}.
+       ok: None=ไม่มีเงื่อนไขต้องตรวจ (โชว์ '-' ไม่ไฮไลต์) ; 'review'=ต้องเทียบ ENTER ด้วยคน (ส้ม, เฉพาะ
+       MOVEMENT กรณีไปลาว) ; True/False=ตรง/ไม่ตรง (note=None เมื่อ True)."""
+    desc_u = (m['desc'] or '').upper()
+    has_used_engine = 'USED ENGINE' in desc_u
+    dest_country = find_dest_country(m['transit'])
+    out = {}
+
+    ok, exp, lbl = check_shed(m.get('port_discharge', ''), bool(m['dg']), has_used_engine, dest_country,
+                               m.get('shed_no', ''))
+    raw = m.get('shed_no') or ''
+    if ok is None:
+        out['shed'] = {'ok': None, 'text': '-', 'note': None}
+    elif ok and lbl == 'SHED ที่แจ้ง':
+        out['shed'] = {'ok': True, 'text': '-', 'note': None}   # ตรงกับที่แจ้ง → '-'
+    else:
+        txt = raw + ('' if ok else f'  (ต้องเป็น {exp})' if lbl == 'SHED ที่แจ้ง'
+                     else f'  (ต้องเป็น {exp} — {lbl})')
+        note = None if ok else f"SHED NO. ไม่ตรง — {lbl} ต้องเป็น {exp} (MANIFEST: {raw or '(ว่าง)'})"
+        out['shed'] = {'ok': ok, 'text': txt, 'note': note}
+
+    ok, exp, act = check_dest_code(m['transit'], m.get('dest_code_raw', ''))
+    if ok is None:
+        out['dest'] = {'ok': None, 'text': '-', 'note': None}
+    else:
+        disp = f'({act})' if act else '(ว่าง)'
+        txt = disp + ('' if ok else f'  (ต้องเป็น ({exp}) — {dest_country})')
+        note = None if ok else f"ประเทศปลายทางไม่ตรง — {dest_country} ต้องเป็น ({exp}) (MANIFEST: {disp})"
+        out['dest'] = {'ok': ok, 'text': txt, 'note': note}
+
+    ok, exp, act = check_movement(m['transit'], dest_country, m.get('movement_raw', ''),
+                                   (e or {}).get('movement_raw', ''))
+    raw_mv = m.get('movement_raw') or ''
+    if ok is None:
+        out['mv'] = {'ok': None, 'text': '-', 'note': None}
+    elif ok == 'review':
+        out['mv'] = {'ok': 'review', 'text': (raw_mv or '(ว่าง)') + '  (ต้องเทียบ ENTER)',
+                     'note': 'CARGO MOVEMENT ไปลาว — ไม่พบค่า CARGO MOVEMENT ใน ENTER ของ B/L นี้ ต้องตรวจสอบด้วยคน'}
+    else:
+        txt = (raw_mv or '(ว่าง)') + ('' if ok else f'  (ต้องเป็น {exp})')
+        note = None if ok else f"CARGO MOVEMENT ไม่ตรง — ต้องเป็น {exp} (MANIFEST: {raw_mv or '(ว่าง)'})"
+        out['mv'] = {'ok': ok, 'text': txt, 'note': note}
+
+    # CNEE./NOTIFY ต้องเหมือนกัน (เทียบกับ N: ของ MANIFEST เองเท่านั้น) ยกเว้น B/L ที่มี TRANSIT/
+    # TRANSHIPMENT — กรณีนั้นให้ตรวจตามทั้ง MANIFEST และ ENTER (NOTIFY ที่ ENTER ระบุแยกอาจเป็นผู้รับ
+    # ช่วงขนส่งที่ถูกต้องกว่า ไม่ใช่ N: ของ MANIFEST เพียงอย่างเดียว)
+    enter_notify = (e or {}).get('notify') if m['transit'] else None
+    ok, name, notify = check_taxid(m.get('tax_id_raw', ''), m['notify'], enter_notify)
+    if ok is None:
+        out['tax'] = {'ok': None, 'text': '-', 'note': None}
+    else:
+        txt = name + ('' if ok else f'  (N:/NOTIFY = {notify or "(ว่าง)"})')
+        note = None if ok else (f"TAX ID ไม่ตรงกับ N:/NOTIFY PARTY — TAX ID: {name} / N: {notify or '(ว่าง)'}"
+                                 + (f" / ENTER NOTIFY: {enter_notify}" if enter_notify else ''))
+        out['tax'] = {'ok': ok, 'text': txt, 'note': note}
+
+    return out
+
+
 PKG_KIND = {'CS': 'CASE', 'PX': 'PALLET', 'PL': 'PALLET', 'CT': 'CARTON', 'CTN': 'CARTON',
             'BX': 'BOX', 'PK': 'PACKAGE', 'PKG': 'PACKAGE', 'SX': 'SET', 'DR': 'DRUM',
             'RO': 'ROLL', 'RL': 'ROLL', 'BG': 'BAG', 'BE': 'BALE', 'BL': 'BALE',
@@ -90,7 +261,7 @@ def canon_pkg(s):
     """ชนิดบรรจุภัณฑ์มาตรฐาน — ตัดตัวเลข/รหัสย่อ/'(s)' ออก ('5 PX (PALLET(s))' -> 'PALLET')."""
     if not s:
         return ''
-    u = s.upper()
+    u = re.sub(r'\bPKGS?\b', 'PACKAGE', re.sub(r'\bCTNS?\b', 'CARTON', s.upper()))
     for w in ('WOODEN CASE', 'PALLET', 'CARTON', 'PACKAGE', 'CASE', 'BOX', 'SET', 'DRUM',
               'ROLL', 'BAG', 'BALE', 'CRATE', 'UNIT', 'PIECE', 'SKID', 'BUNDLE'):
         if w in u:
@@ -227,6 +398,22 @@ def detect_bl_prefix(rows):
     return re.compile(r'^[A-Z]{3,8}[A-Z0-9]{6,}$')   # fallback ทั่วไป
 
 
+_MARKS_COL_LINE_RE = re.compile(r'^\d+\.\s*[A-Z]{4}\d{6,7}')
+
+
+def detect_marks_col(rows):
+    """เดาคอลัมน์ marks+container number จากตำแหน่งที่พบแพทเทิร์นเลขตู้ '1. HALU2555328' บ่อยที่สุด —
+       บางไฟล์ (แม้เทมเพลตหน้าตาเดียวกัน) คอลัมน์นี้เลื่อนไป 1 ช่องจากที่คอมเมนต์เดิมไว้ (5) เพราะขอบเขต
+       merge เซลล์หัวตาราง 'MARKS AND NUMBERS'/'CONTAINER NO.' ไม่ตรงกับคอลัมน์ข้อมูลจริงเป๊ะเสมอไป —
+       เดาจากข้อมูลจริงแทนเดาจากตำแหน่งหัวตาราง กันพังเงียบๆ เมื่อเจอไฟล์ที่เลื่อนคอลัมน์."""
+    counts = Counter()
+    for row in rows:
+        for idx, v in enumerate(row):
+            if _MARKS_COL_LINE_RE.match(str(v).strip()):
+                counts[idx] += 1
+    return counts.most_common(1)[0][0] if counts else 5
+
+
 def _cell(row, i):
     if i >= len(row):
         return ''
@@ -246,6 +433,7 @@ def parse_manifest(path):
     sh = book.sheet_by_index(0)
     rows = [sh.row_values(r) for r in range(sh.nrows)]
     BL_RE = detect_bl_prefix(rows)
+    MARKS_COL = detect_marks_col(rows)
 
     vessel = ''
     declared = {}   # ยอดรวมที่ MANIFEST ระบุเอง (GRAND TOTAL: ...) ถ้ามี
@@ -253,6 +441,10 @@ def parse_manifest(path):
     END = re.compile(r'^(PORT TOTAL|GRAND TOTAL|TOTAL\b|PortOfDischarge)', re.I)
     ST_TOK = ('CY/CY', 'CY-CY', 'LCL/CFS', 'CFS/CFS', 'FCL/CFS', 'CY', 'LCL', 'CFS', 'FCL')
 
+    # PORT OF DISCHARGE ต่อ 'หน้า' (พิมพ์ซ้ำในหัวตารางทุกหน้า อาจเปลี่ยนค่าได้ระหว่างไฟล์) — ใช้ตอน
+    # ตรวจกฎ SHED NO. (ข้อ 1 ด้านล่าง) ว่า B/L แต่ละตัวอยู่ใต้หัวตารางไหน เก็บเป็นค่า ณ แต่ละแถวไว้ล่วงหน้า
+    port_discharge_at = [''] * n
+    cur_pd = ''
     for ridx, row in enumerate(rows):
         v0 = _cell(row, 0)
         if v0.upper() == 'VESSEL & VOYAGE' and not vessel:
@@ -261,6 +453,15 @@ def parse_manifest(path):
                 if cs:
                     vessel = cs
                     break
+        for k in range(len(row)):
+            if _cell(row, k).upper() == 'PORT OF DISCHARGE':
+                for k2 in range(k + 1, len(row)):
+                    v = _cell(row, k2)
+                    if v:
+                        cur_pd = v
+                        break
+                break
+        port_discharge_at[ridx] = cur_pd
         row_txt = ' '.join(_cell(row, k) for k in range(len(row)))
         if re.search(r'GRAND TOTAL', row_txt, re.I):
             joined = ' '.join(' '.join(_cell(r2, k) for k in range(len(r2)))
@@ -279,8 +480,10 @@ def parse_manifest(path):
             continue
         rec = {'bl': bl, 'pkg_hdr': _cell(rows[i], 10), 'gw': _cell(rows[i], 16),
                'cons': '', 'notify': '', 'cont': [], 'status': '', 'meas': '',
-               'marks': [], 'desc': [], 'transit': '', 'dg': '', 'reefer': ''}
-        h5 = _cell(rows[i], 5)
+               'marks': [], 'desc': [], 'transit': '', 'dg': '', 'reefer': '',
+               'port_discharge': port_discharge_at[i],
+               'shed_no': '', 'dest_code_raw': '', 'movement_raw': '', 'tax_id_raw': ''}
+        h5 = _cell(rows[i], MARKS_COL)
         if h5 and not re.match(r'^\d+\.\s*([A-Z]{4}\d{6,7}|\s*$)', h5):
             rec['marks'].append(h5)
         transit_open = False   # true ตั้งแต่พบคำ transit ในบล็อกนี้ครั้งแรก — ข้อความบรรทัดต่อจากนั้น
@@ -291,7 +494,10 @@ def parse_manifest(path):
             a = _cell(rows[j], 0)
             if BL_RE.match(a):
                 break
-            if END.match(a):
+            # END ปกติอยู่คอลัมน์ 0 (เช่น 'PortOfDischarge: ...' ท้ายทุกหน้า) แต่ตัวสรุปยอดรวมทั้งฉบับ
+            # ท้ายไฟล์จริง ('PORT TOTAL:' / 'TOTAL MEASUREMENT:' ฯลฯ) บางไฟล์พิมพ์เยื้องไปคอลัมน์ 1 แทน
+            # — เช็คทุกคอลัมน์ในแถว ไม่งั้นบล็อก B/L สุดท้ายจะดูดข้อความสรุปยอดปนเข้า marks ไปเงียบๆ
+            if any(END.match(_cell(rows[j], k)) for k in range(len(rows[j]))):
                 j += 1
                 break
             if a.startswith('C :'):
@@ -304,14 +510,14 @@ def parse_manifest(path):
                 rec['cons'] += ' ' + a
             elif rec['notify'] and not a.startswith(('1.', '2.', '3.')):
                 rec['notify'] += ' ' + a
-            c5 = _cell(rows[j], 5)
+            c5 = _cell(rows[j], MARKS_COL)
             if c5:
                 mm = re.match(r'^\d+\.\s*([A-Z]{4}\d{6,7})', c5)
                 if mm:
                     rec['cont'].append(mm.group(1))
                 elif not re.match(r'^\d+\.\s*$', c5):
                     rec['marks'].append(c5)
-            for cc in (_cell(rows[j], 5), _cell(rows[j], 10)):
+            for cc in (_cell(rows[j], MARKS_COL), _cell(rows[j], 10)):
                 if cc and DG_RE.search(cc) and not rec['dg']:
                     rec['dg'] = find_dg(cc)
                 if cc and re.search(r'REEFER|TEMP|อุณหภูมิ', cc, re.I) and not rec['reefer']:
@@ -343,6 +549,20 @@ def parse_manifest(path):
             c16 = _cell(rows[j], 16)
             if c16 and 'MTQ' in c16.upper() and not rec['meas']:
                 rec['meas'] = c16
+            # 4 ช่องกฎเพิ่มเติม (col 15): "1) SHED NO. ####" / "2) ประเทศปลายทาง (XX)" /
+            # "3) CARGO MOVEMENT (X)" / "4) TAX ID: (ชื่อ)" — พิมพ์เป็น 4 บรรทัดเรียงกันในบล็อกเดียวกัน
+            c15 = _cell(rows[j], 15)
+            if c15:
+                if c15.startswith('1)') and not rec['shed_no']:
+                    msh = re.search(r'\d{3,4}', c15)
+                    rec['shed_no'] = msh.group(0) if msh else ''
+                elif c15.startswith('2)') and not rec['dest_code_raw']:
+                    rec['dest_code_raw'] = c15
+                elif c15.startswith('3)') and not rec['movement_raw']:
+                    mmv = re.search(r'\(([^)]*)\)', c15)
+                    rec['movement_raw'] = mmv.group(1).strip() if mmv else ''
+                elif c15.startswith('4)') and not rec['tax_id_raw']:
+                    rec['tax_id_raw'] = c15
             j += 1
         rec['marks'] = ' '.join(rec['marks'])
         rec['desc'] = ' '.join(rec['desc'])
@@ -355,8 +575,8 @@ def parse_manifest(path):
 # ═══════════════════════════ 2) ENTER.pdf ═══════════════════════════
 JUNK = {'MARK&NO.', 'PACKAGES', 'DESCRIPTION OF GOODS', 'NO. OF PKGS'}
 _PAGELN = re.compile(r'^Page \d+ of \d+$')
-PKG_WORDS = ('WOODEN CASE', 'PALLET', 'CARTON', 'PACKAGE', 'CASE', 'BOX', 'SET', 'DRUM',
-             'ROLL', 'BAG', 'BALE', 'CRATE', 'UNIT', 'PIECE')
+PKG_WORDS = ('WOODEN CASE', 'WOODEN BOX', 'PALLET', 'CARTON', 'PACKAGE', 'CASE', 'BOX', 'SET',
+             'DRUM', 'ROLL', 'BAG', 'BALE', 'CRATE', 'UNIT', 'PIECE')
 
 
 def parse_enter(path, bl_re):
@@ -367,6 +587,9 @@ def parse_enter(path, bl_re):
 
     # 1) ดึงข้อความพิมพ์เพิ่ม (FreeText) ผูกกับ B/L ตามตำแหน่ง y
     ent_annot = {}
+    # ค่า "CARGO MOVEMENT <รหัส>" ที่พิมพ์เป็นข้อความปกติ (ไม่ใช่ FreeText annotation) ใต้ DESCRIPTION ของ
+    # แต่ละบล็อก — ใช้เทียบกับ rec['movement_raw'] ของ MANIFEST เฉพาะกรณีปลายทางเป็นลาว (ดู check_movement())
+    ent_movement = {}
     annot_raw = []   # (page_idx, ข้อความดิบเต็ม) ของทุก FreeText annotation — ใช้กรองไม่ให้ปนเข้า
                       # marks/desc ทีหลัง เก็บเลขหน้าไว้ด้วยเพื่อกรองแค่บรรทัดในหน้าเดียวกัน (ดูจุดใช้งาน
                       # ด้านล่าง — คำสั้นๆ ที่บังเอิญไปซ้ำกับคำในเนื้อความ annotation ของ B/L อื่นคนละหน้า
@@ -382,14 +605,31 @@ def parse_enter(path, bl_re):
         anchors.sort()
         if not anchors:
             continue
+        for b in pg.get_text('dict')['blocks']:
+            for l in b.get('lines', []):
+                t = ''.join(s['text'] for s in l['spans']).strip()
+                mmv = re.match(r'^CARGO\s*MOVEMENT\s*([0-9A-Za-z\-]+)$', t, re.I)
+                if mmv:
+                    y = l['bbox'][1]
+                    # ต่างจาก FreeText annotation (ผูกกับ anchor "ด้านล่าง") — ข้อความ "CARGO MOVEMENT n"
+                    # เป็นเนื้อหาปกติที่พิมพ์อยู่ *ใต้* เลข B/L ของบล็อกตัวเอง (ซึ่งมักอยู่กลาง/ท้ายบล็อก
+                    # ก่อนบล็อกถัดไป) จึงต้องผูกกับ anchor ที่อยู่ "เหนือ" มันที่ใกล้ที่สุดแทน มิฉะนั้นจะ
+                    # เผลอไปแมตช์กับ B/L ของบล็อกถัดไปที่ยังไม่เจอ (ดู references/format-notes.md)
+                    cand = [(yy, blx) for yy, blx in anchors if yy <= y + 5] or anchors
+                    ent_movement[max(cand)[1]] = mmv.group(1).upper()
         def _apply_annot(bl, txt):
-            rec = ent_annot.setdefault(bl, {'status': '', 'transit': '', 'dg': '', 'reefer': ''})
+            rec = ent_annot.setdefault(bl, {'status': '', 'transit': '', 'dg': '', 'reefer': '', 'notify': ''})
             if DG_RE.search(txt):
                 rec['dg'] = find_dg(txt)
             elif re.search(r'REEFER|TEMP|อุณหภูมิ', txt, re.I):
                 rec['reefer'] = find_temp(txt)
             elif TRANSIT_RE.search(txt):
                 rec['transit'] = txt
+            elif re.match(r'^NOTIFY\s*:?\s*', txt, re.I):
+                # เอกสาร AGN (layout D) บางฉบับมี FreeText annotation ซ้ำเนื้อหากับที่พิมพ์ไว้แล้วใน
+                # คอลัมน์ CONSIGNEE/NOTIFY ของตาราง — ไม่ใช่ STATUS อย่ากลืนเข้าไปปนกับ STATUS annotation
+                # อื่นของบล็อกเดียวกัน (เช่นแอนโนเทชันช่วง B/L ที่ประกาศ STATUS ให้ทั้งฐาน B/L ถึงตัวจบ)
+                rec['notify'] = re.sub(r'^NOTIFY\s*:?\s*', '', txt, flags=re.I).strip()
             else:
                 rec['status'] = (rec['status'] + ' ' + txt).strip()
 
@@ -443,6 +683,11 @@ def parse_enter(path, bl_re):
                     full_text, re.I | re.S)
     blk = None if gt else re.search(
         rf'PACKAGES\s*:?\s*({NUM}).{{0,200}}?KGS\s*:?\s*({NUM})\s+({NUM})\s*CBM', full_text, re.I | re.S)
+    # เลย์เอาต์ 3 (Cargoport AMENDMENT) เขียนยอดรวมแบบ 'TOTAL <n> PACKAGE(S) ... G.W <n> KGS. <n> M3.'
+    # แทนคำว่า PACKAGES/CBM ของแบบฟอร์มอื่น
+    tot3 = None if (gt or blk) else re.search(
+        rf'\bTOTAL\s*({NUM})\s*PACKAGE\(S\).{{0,150}}?G\.W\.?\s*({NUM})\s*KGS.{{0,150}}?({NUM})\s*M3',
+        full_text, re.I | re.S)
     if gt:
         declared['pkg'] = int(float(gt.group(1).replace(',', '')))
         declared['gw'] = float(gt.group(2).replace(',', ''))
@@ -451,6 +696,10 @@ def parse_enter(path, bl_re):
         declared['pkg'] = int(float(blk.group(1).replace(',', '')))
         declared['gw'] = float(blk.group(2).replace(',', ''))
         declared['meas'] = float(blk.group(3).replace(',', ''))
+    elif tot3:
+        declared['pkg'] = int(float(tot3.group(1).replace(',', '')))
+        declared['gw'] = float(tot3.group(2).replace(',', ''))
+        declared['meas'] = float(tot3.group(3).replace(',', ''))
     else:
         # ต้องเจอครบทั้ง 3 ฟิลด์ถึงจะถือว่าเป็นยอดรวมทั้งฉบับจริง — ถ้าเจอแค่ฟิลด์เดียวลอยๆ
         # มีโอกาสสูงว่าเป็นตัวเลขของ B/L ย่อยตัวใดตัวหนึ่ง ไม่ใช่ยอดรวมทั้งฉบับ
@@ -636,12 +885,271 @@ def parse_enter(path, bl_re):
         rec['low_confidence'] = not layout_b_trusted
         ENT[bl] = rec   # layout B ทับ layout A ถ้าเจอ B/L เดียวกันทั้งสองวิธี (โครงสร้างเฉพาะกว่า A)
 
-    # เติมด้วยตัวอ่านสำรองทั่วไปสำหรับ B/L ที่ layout A/B ที่รู้จักหาไม่เจอ (ทั้งเอกสาร ไม่ใช่แค่ตอน
-    # ENT ว่างเปล่าทั้งหมด) — เอกสารผสมหลาย layout ต้องพึ่ง fallback เฉพาะหน้าที่ไม่ตรงทั้ง A และ B
+    # เลย์เอาต์แบบที่ 3 ("AMENDMENT" ของ Cargoport): ตารางจริงมีคอลัมน์ HB/L NO / MARKS & NUMBERS /
+    # QUANTITY / DESCRIPTION / CONSIGNEE / GROSS WEIGHT+MEASUREMENT / D/O NO. แยกกันชัดเจนตามตำแหน่ง
+    # x0 — แต่เลข B/L ย่อยถูกพิมพ์เป็น "เลขฐาน" กับ "ตัวอักษรต่อท้าย" คนละบรรทัดในคอลัมน์เดียวกัน
+    # (เช่น 'HASLS21260800783' บรรทัดหนึ่ง แล้ว 'A' อีกบรรทัดถัดมา) ไม่มี anchor 'B/L NO. :' หรือ
+    # 'CONSIGNEE :' แบบ layout A/B เลย ต้องตรวจจาก x0 ของคอลัมน์ HB/L NO โดยตรง — ดู
+    # parse_enter_layout_c() และ references/format-notes.md
+    ENT_C = parse_enter_layout_c(doc, bl_re, ent_annot)
+    layout_c_trusted = _trusted(ENT_C[1], ENT_C[2])
+    for bl, rec in ENT_C[0].items():
+        rec['low_confidence'] = not layout_c_trusted
+        ENT[bl] = rec
+
+    # เลย์เอาต์แบบที่ 4 ("AMENDMENT" ของ AGN International Logistics): ตารางจริงมีเส้นคั่นคอลัมน์
+    # ชัดเจนแบบเดียวกับ layout C (B/L CHANGE NO. / MARKS & NUMBERS / QUANTITY / DESCRIPTION /
+    # CONSIGNEE / GROSS WEIGHT) แต่ต่างจาก C ตรงที่เลข B/L ย่อยพิมพ์เต็มบรรทัดเดียว (ไม่ตัดฐาน/ตัวอักษร
+    # คนละบรรทัด) และมีคอลัมน์ CONSIGNEE ที่ซ้อน 'NOTIFY:' ไว้ใต้ชื่อผู้รับในคอลัมน์เดียวกัน — ดู
+    # parse_enter_layout_d() และ references/format-notes.md
+    ENT_D = parse_enter_layout_d(doc, bl_re, ent_annot)
+    layout_d_trusted = _trusted(ENT_D[1], ENT_D[2])
+    for bl, rec in ENT_D[0].items():
+        rec['low_confidence'] = not layout_d_trusted
+        ENT[bl] = rec
+
+    # เติมด้วยตัวอ่านสำรองทั่วไปสำหรับ B/L ที่ layout A/B/C/D ที่รู้จักหาไม่เจอ (ทั้งเอกสาร ไม่ใช่แค่ตอน
+    # ENT ว่างเปล่าทั้งหมด) — เอกสารผสมหลาย layout ต้องพึ่ง fallback เฉพาะหน้าที่ไม่ตรงทั้ง 4 แบบ
     for bl, rec in parse_enter_generic(doc, bl_re, ent_annot).items():
         if bl not in ENT:
             ENT[bl] = rec
+
+    for rec in ENT.values():
+        rec['movement_raw'] = ent_movement.get(rec['bl'], '')
     return ENT, declared
+
+
+# ═══════════════ 2c) ENTER.pdf — เลย์เอาต์แบบที่ 3: ตาราง Cargoport 'AMENDMENT' ═══════════════
+# คอลัมน์ (x0 โดยประมาณ, มี margin กันความคลาดเคลื่อนของฟอนต์/บรรทัด):
+#   HB/L NO ~46   | MARKS & NUMBERS ~143 | QUANTITY ~277 | DESCRIPTION ~363 |
+#   CONSIGNEE ~505 | GROSS WEIGHT ~605-635 | MEASUREMENT ~660-665 | D/O NO. ~708-720
+_LC_BL_X_MAX = 95
+_LC_MARKS_MAX, _LC_QTY_MAX, _LC_DESC_MAX, _LC_CONS_MAX, _LC_GW_MAX, _LC_MEAS_MAX = 240, 320, 470, 590, 650, 690
+_LC_PKG_RE = re.compile(r'^([\d,]+)\s+([A-Za-z].*)$')
+
+
+def parse_enter_layout_c(doc, bl_re, ent_annot):
+    """คืน (records:dict[bl->rec], n_success, n_anchor).
+       เลย์เอาต์นี้ไม่มี anchor คำ ('B/L NO. :' ฯลฯ) เหมือน layout A/B — คอลัมน์ HB/L NO คือคอลัมน์
+       ซ้ายสุดของตาราง (x0 < 95) แต่ละบล็อกพิมพ์เลข B/L ฐานเต็ม แล้วถ้ามีบล็อกย่อยจะพิมพ์ตัวอักษร
+       ต่อท้าย 1 ตัวเป็นอีกบรรทัดถัดมาในคอลัมน์เดียวกัน (บล็อกฐานที่ไม่มีตัวต่อท้ายจะไม่มีบรรทัดนี้).
+       ไม่มีคอลัมน์ CONTAINER แยกต่อแถว (ของ LCL รวมกันในตู้เดียว) — เลขตู้พิมพ์ครั้งเดียวที่ป้าย
+       'CONT NO.' ในหัวเอกสาร ใช้ค่านี้กับทุก B/L ย่อย. STATUS ก็มักพิมพ์ครั้งเดียวท้ายตาราง
+       (แถว TOTAL) ครอบคลุมทั้งฉบับแทนที่จะพิมพ์ซ้ำทุกบล็อก."""
+    # การ์ดกัน false-positive: anchor (x0<95 + bl_re) ตรงกับเลข B/L ชิดซ้ายของ layout A/B ได้ จนทับข้อมูลถูกด้วยข้อมูลมั่ว
+    # layout C จริงต้องมีหัวตาราง 'MARKS & NUMBERS' และ 'HB/L NO' (ดู references/format-notes.md)
+    full_text_upper = '\n'.join(doc[p].get_text() for p in range(doc.page_count)).upper()
+    if 'MARKS & NUMBERS' not in full_text_upper or 'HB/L NO' not in full_text_upper:
+        return {}, 0, 0
+    # เลขตู้ระดับเอกสาร: หาแถวป้าย 'CONT NO.' แล้วอ่านค่าที่อยู่แถวเดียวกันทางขวา (ก่อนตาราง B/L)
+    master_cont = ''
+    lines0 = [(l['bbox'][1], l['bbox'][0], ''.join(s['text'] for s in l['spans']).strip())
+              for b in doc[0].get_text('dict')['blocks'] for l in b.get('lines', [])]
+    lines0 = [x for x in lines0 if x[2]]
+    cont_lbl = next(((y, x) for y, x, t in lines0 if re.match(r'^CONT\s*NO\.?$', t, re.I)), None)
+    if cont_lbl:
+        ly, lx = cont_lbl
+        val = next((t for y, x, t in lines0 if abs(y - ly) < 3 and x > lx), '')
+        cm = CONT_RE.search(val)
+        master_cont = cm.group(0) if cm else ''
+
+    ENT, n_anchor, summary_lines = {}, 0, []
+    for p in range(doc.page_count):
+        pg = doc[p]
+        raw, hit_total = [], False
+        for b in pg.get_text('dict')['blocks']:
+            for l in b.get('lines', []):
+                t = ''.join(s['text'] for s in l['spans']).strip()
+                if not t or _PAGELN.match(t):
+                    continue
+                if hit_total:
+                    summary_lines.append(t)   # แถวยอดรวม/STATUS ท้ายตาราง — เก็บไว้ใช้แยกต่างหาก
+                    continue
+                if t.upper() == 'TOTAL':
+                    hit_total = True
+                    summary_lines.append(t)
+                    continue
+                raw.append((l['bbox'][1], l['bbox'][0], t))
+        raw.sort(key=lambda x: (round(x[0], 1), x[1]))
+
+        starts = []   # (bl, raw_index ที่บล็อกเริ่ม)
+        idxs = [i for i, (_, x, t) in enumerate(raw)
+                if x < _LC_BL_X_MAX and (bl_re.match(t) or re.fullmatch(r'[A-Z]', t))]
+        k = 0
+        while k < len(idxs):
+            i0 = idxs[k]
+            base = raw[i0][2]
+            if not bl_re.match(base):
+                k += 1
+                continue
+            n_anchor += 1
+            bl = base
+            if k + 1 < len(idxs):
+                letter = raw[idxs[k + 1]][2]
+                if re.fullmatch(r'[A-Z]', letter) and bl_re.match(base + letter):
+                    bl = base + letter
+                    k += 1
+            starts.append((bl, i0))
+            k += 1
+
+        for si, (bl, i0) in enumerate(starts):
+            end_i = starts[si + 1][1] if si + 1 < len(starts) else len(raw)
+            body = [(x, t) for _, x, t in raw[i0:end_i] if x >= _LC_BL_X_MAX]
+            marks = ' '.join(t for x, t in body if x < _LC_MARKS_MAX)
+            qty_line = next((t for x, t in body if _LC_MARKS_MAX <= x < _LC_QTY_MAX), '')
+            desc = ' '.join(t for x, t in body if _LC_QTY_MAX <= x < _LC_DESC_MAX)
+            cons = ' '.join(t for x, t in body if _LC_DESC_MAX <= x < _LC_CONS_MAX)
+            gw_txt = ' '.join(t for x, t in body if _LC_CONS_MAX <= x < _LC_GW_MAX)
+            meas_txt = ' '.join(t for x, t in body if _LC_GW_MAX <= x < _LC_MEAS_MAX)
+            do_txt = ' '.join(t for x, t in body if x >= _LC_MEAS_MAX)
+            pm = _LC_PKG_RE.match(qty_line)
+            cnt = int(pm.group(1).replace(',', '')) if pm else None
+            pkgtype = pm.group(2).strip() if pm else ''
+            combined = f'{marks} {desc}'
+            rec = ent_annot.get(bl, {})
+            ENT[bl] = {'bl': bl, 'cons': cons, 'cont': master_cont, 'pkgs': cnt, 'pkgtype': pkgtype,
+                       'gw': num(gw_txt), 'meas': num(meas_txt), 'marks': marks, 'desc': desc,
+                       'status_raw': rec.get('status', ''), 'transit_raw': rec.get('transit', ''),
+                       'dg': rec.get('dg', '') or find_dg(combined),
+                       'reefer': rec.get('reefer', '') or find_temp(combined), '_do': do_txt}
+
+    # STATUS มักพิมพ์ครั้งเดียวท้ายตาราง (แถว TOTAL) ครอบคลุมทั้งฉบับ ไม่ได้ซ้ำทุกบล็อก — ใช้เป็นค่า
+    # ตั้งต้นเฉพาะ B/L ที่ยังไม่มี status_raw ของตัวเอง (เช่น จาก FreeText annotation เฉพาะจุด)
+    summary_txt = ' '.join(summary_lines)
+    sm = re.search(r'STATUS\s*:?\s*([A-Z/]+)', summary_txt, re.I)
+    if sm:
+        for rec in ENT.values():
+            if not rec['status_raw']:
+                rec['status_raw'] = sm.group(1).strip()
+    return ENT, len(ENT), n_anchor
+
+
+# ═══════════ 2d) ENTER.pdf — เลย์เอาต์แบบที่ 4: ตาราง AGN International Logistics 'AMENDMENT' ═══════════
+# คอลัมน์ (x0 โดยประมาณ, มี margin กันความคลาดเคลื่อนของฟอนต์/บรรทัด):
+#   B/L CHANGE NO. ~38-71 | MARKS & NUMBERS ~182 | QUANTITY ~324 | DESCRIPTION ~395-435 |
+#   CONSIGNEE (+ 'NOTIFY:' ซ้อนอยู่ใต้ชื่อผู้รับในคอลัมน์เดียวกัน) ~549-593 | GROSS WEIGHT (KGS แล้ว
+#   CBM คนละบรรทัด) ~727-765
+_LD_BL_X_MAX = 95
+_LD_MARKS_MAX, _LD_QTY_MAX, _LD_DESC_MAX, _LD_CONS_MAX = 300, 390, 545, 710
+_LD_HDR_RE = re.compile(r'^B\s*/\s*L\s*CHANGE\s*NO\.?$', re.I)
+_LD_QTY_RE = re.compile(r'^([\d,]+)\s+(.*)$')
+# ฟอนต์ไทยบางไฟล์ของ AGN ถอดข้อความออกมาเป็นอักขระแทน (เช่น '*** เร=งเป@ดตCDเขDาโกดIงด=วน ***' =
+# 'เร่งเปิดตู้เข้าโกดังด่วน') — แปลงกลับเฉพาะข้อความ STATUS ที่หัวเอกสาร (มีอักษรไทยปนอยู่) เท่านั้น
+_LD_TH_FIX = str.maketrans({'=': '่', '@': 'ิ', 'C': 'ู', 'D': '้', 'I': 'ั'})
+
+
+def _page_lines(page):
+    """คืน [(y, x, text)] ของทุกบรรทัดในหน้า — ถ้าข้อความทั้งหน้าถูกวาดแบบหมุน 90° (หน้า portrait แต่
+       เนื้อหาเป็นแนวนอน, page.rotation ยังเป็น 0 — พบใน ENTER ของ AGN บางไฟล์) จะหมุนพิกัดกลับให้เป็น
+       แนวอ่านปกติก่อน ไม่งั้นคอลัมน์ตาม x0 จะสลับเป็นแนว y ทั้งหมด."""
+    W, H = page.rect.width, page.rect.height
+    lines = [l for b in page.get_text('dict')['blocks'] for l in b.get('lines', [])]
+    dirs = Counter(tuple(round(v) for v in l['dir']) for l in lines)
+    rot = dirs.most_common(1)[0][0] if dirs else (1, 0)
+    out = []
+    for l in lines:
+        t = ''.join(s['text'] for s in l['spans']).strip()
+        if not t:
+            continue
+        x0, y0, x1, y1 = l['bbox']
+        if rot == (0, -1):      # ข้อความวิ่งจากล่างขึ้นบน → หมุนตามเข็ม 90°
+            out.append((x0, H - y1, t))
+        elif rot == (0, 1):     # ข้อความวิ่งจากบนลงล่าง → หมุนทวนเข็ม 90°
+            out.append((W - x1, y0, t))
+        else:
+            out.append((y0, x0, t))
+    return out
+
+
+def parse_enter_layout_d(doc, bl_re, ent_annot):
+    """คืน (records:dict[bl->rec], n_success, n_anchor).
+       ต่างจาก layout C ตรงที่เลข B/L ย่อยพิมพ์เต็มบรรทัดเดียว (ไม่ตัดฐาน/ตัวอักษรต่อท้ายคนละบรรทัด)
+       และคอลัมน์ซ้ายสุดชื่อ 'B/L CHANGE NO.' — เช็คหา anchor นี้ก่อนถึงจะเดินคอลัมน์ต่อ กันไปแมตช์มั่ว
+       กับเอกสารอื่นที่ไม่ใช่เลย์เอาต์นี้จริง ๆ."""
+    pages = [_page_lines(doc[p]) for p in range(doc.page_count)]
+    if not any(_LD_HDR_RE.match(t) for items in pages for _, _, t in items):
+        return {}, 0, 0
+
+    # STATUS ที่หัวเอกสาร ('STATUS : ...') ครอบคลุมทุก B/L — ใช้เมื่อ B/L นั้นไม่มี annotation STATUS เอง
+    head_status = ''
+    for items in pages:
+        lbl = next(((y, x) for y, x, t in items if re.fullmatch(r'STATUS', t, re.I)), None)
+        if lbl:
+            val = [t for y, x, t in sorted(items, key=lambda i: i[1])
+                   if abs(y - lbl[0]) < 3 and x > lbl[1] and t != ':']
+            if val:
+                v = val[0].strip('* ').strip()
+                head_status = v.translate(_LD_TH_FIX) if re.search('[฀-๿]', v) else v
+                # ฟอนต์บางไฟล์เพี้ยนอีกแบบ ('เรรงเปปดตตเขตาโกดดงดรวน') — จับจากโครงพยัญชนะแทน
+                if re.search(r'เร.งเป.ดต.{1,2}เข.าโกด.งด.วน', head_status):
+                    head_status = 'เร่งเปิดตู้เข้าโกดังด่วน'
+            break
+
+    ENT, n_anchor = {}, 0
+    for items in pages:
+        items = sorted(i for i in items if not _PAGELN.match(i[2]))   # ตัดบรรทัด 'Page n of m' ท้ายหน้า
+        anchors = []
+        for y, x, t in items:
+            if x < _LD_BL_X_MAX and bl_re.match(t):
+                # เลข B/L ย่อยที่ยาว (เช่น '...790ZZZ' + 'ZB') ถูกตัดขึ้นบรรทัดใหม่ในคอลัมน์เดียวกัน —
+                # ต่อท่อนตัวอักษรล้วนที่อยู่ใต้ anchor ทันที (x เดียวกัน) กลับเข้าไป
+                tail = next((t2 for y2, x2, t2 in items if 0 < y2 - y < 16 and abs(x2 - x) < 4
+                             and re.fullmatch(r'[A-Z0-9]{1,4}', t2)), '')
+                anchors.append((y, t + tail))
+        anchors.sort()
+        if not anchors:
+            continue
+        tot_y = min((y for y, x, t in items if re.match(r'^TOTAL\b', t, re.I)), default=None)
+        for idx, (ay, bl) in enumerate(anchors):
+            n_anchor += 1
+            y_end = anchors[idx + 1][0] if idx + 1 < len(anchors) else 1e9
+            if tot_y is not None and ay < tot_y < y_end:
+                y_end = tot_y
+            band = [(y, x, t) for y, x, t in items if ay - 2 <= y < y_end]
+
+            marks = ' '.join(t for y, x, t in band if _LD_BL_X_MAX <= x < _LD_MARKS_MAX)
+            # QUANTITY อาจถูกตัดเป็น 2 บรรทัด ('203' / 'CARTONS') — ต่อทุกบรรทัดในคอลัมน์ก่อนแยกจำนวน/ชนิด
+            qty_line = ' '.join(t for y, x, t in band if _LD_MARKS_MAX <= x < _LD_QTY_MAX)
+            # 'CARGO MOVEMENT n' ตัดออกจาก DESCRIPTION — เป็นรหัสศุลกากรล้วนๆ ไม่ใช่ "รายละเอียดสินค้า"
+            # และมีคอลัมน์ CARGO MOVEMENT ของตัวเองอยู่แล้ว (ดึงแยกไว้ที่ ent_movement ข้างบน) เข้าเกณฑ์
+            # เดียวกับที่ตัด STATUS/รหัสชนิดตู้ออกจาก DESCRIPTION (MANIFEST) ฝั่งเดียวกัน
+            desc = ' '.join(t for y, x, t in band if _LD_QTY_MAX <= x < _LD_DESC_MAX
+                             and not re.match(r'^CARGO\s*MOVEMENT\s*[0-9A-Za-z\-]+$', t, re.I))
+            cont_line = next((t for y, x, t in band if x < _LD_BL_X_MAX and re.search(r'Cont\s*No', t, re.I)), '')
+
+            # CONSIGNEE และ 'NOTIFY:' ซ้อนอยู่คอลัมน์เดียวกัน — ตัดที่บรรทัด 'NOTIFY:' เอง
+            cons_col = sorted((y, t) for y, x, t in band if _LD_DESC_MAX <= x < _LD_CONS_MAX)
+            ni = next((i for i, (y, t) in enumerate(cons_col) if re.match(r'^NOTIFY\s*:?$', t, re.I)), None)
+            cons = ' '.join(t for _, t in (cons_col[:ni] if ni is not None else cons_col))
+            notify = ' '.join(t for _, t in cons_col[ni + 1:]) if ni is not None else ''
+
+            gw_lines = [t for y, x, t in band if x >= _LD_CONS_MAX]
+            gw = next((num(t) for t in gw_lines if 'KGS' in t.upper()), None)
+            meas = next((num(t) for t in gw_lines if 'CBM' in t.upper() or 'M3' in t.upper()), None)
+
+            # QUANTITY แบบ '255 BAGS (7 PALLETS)' — ชนิดหีบห่อจริงคือท่อนแรก ส่วนในวงเล็บ MANIFEST พิมพ์ไว้
+            # ต้น DESCRIPTION ('(7 PALLETS) MULTIAA-ZN ...') จึงย้ายไปนำหน้า desc ให้เทียบกันได้ตรง
+            mp = re.match(r'^(.*?)\s*(\([^()]*\))\s*$', qty_line)
+            if mp and _LD_QTY_RE.match(mp.group(1)):
+                qty_line, desc = mp.group(1), f'{mp.group(2)} {desc}'
+            mq = _LD_QTY_RE.match(qty_line)
+            pkgs = int(mq.group(1).replace(',', '')) if mq else None
+            pkgtype = mq.group(2).strip() if mq else ''
+            cm = CONT_RE.search(cont_line)
+            cont = cm.group(0) if cm else ''
+
+            rec = ent_annot.get(bl, {})
+            combined = f'{marks} {desc}'.strip()
+            ENT[bl] = {
+                'bl': bl, 'cons': cons.strip(), 'notify': notify.strip(), 'cont': cont,
+                'pkgs': pkgs, 'pkgtype': pkgtype, 'gw': gw, 'meas': meas,
+                'marks': marks.strip(), 'desc': desc.strip(),
+                'status_raw': rec.get('status', '') or head_status,
+                'transit_raw': rec.get('transit', '') or (desc if TRANSIT_RE.search(desc) else ''),
+                'dg': rec.get('dg', '') or find_dg(combined),
+                'reefer': rec.get('reefer', '') or find_temp(combined),
+            }
+    return ENT, len(ENT), n_anchor
 
 
 # ═══════════════════ 2b) ENTER.pdf — fallback ทั่วไปเมื่อไม่ตรงทั้ง layout A และ B ═══════════════════
@@ -789,8 +1297,13 @@ thin = Side(style='thin', color='BFBFBF')
 BORD = Border(left=thin, right=thin, top=thin, bottom=thin)
 WARN, OK = '⚠', '✔'
 
+# หมายเหตุ: ลำดับคอลัมน์ "แสดงผลจริง" ในรายงาน (HEAD/NUMCOL/WIDE ด้านล่าง) ไม่ตรงกับเลขคอลัมน์ที่ใช้
+# ภายในฟังก์ชัน build_report() (mk()/cs[...]/COL_SHED ฯลฯ) โดยตั้งใจ — ตรรกะการตรวจทั้งหมดยังเขียนโดย
+# อ้างอิงเลขคอลัมน์ "เดิม" (ก่อนย้าย TAX ID vs NOTIFY มาไว้หลัง CNEE.(MANIFEST) ตามที่ผู้ใช้ขอ) เพื่อไม่
+# ต้องไล่แก้เลขคอลัมน์หลายสิบจุดทั่วฟังก์ชัน แล้วค่อย "สลับตำแหน่งจริง" ครั้งเดียวตอนเขียนลงชีตแต่ละแถว
+# ด้วย _OLD_TO_NEW/_NEW_TO_OLD ด้านล่าง — ถ้าจะย้ายคอลัมน์อีกในอนาคต แก้แค่ HEAD + mapping นี้พอ
 HEAD = ['สรุปผลเร่งด่วน', 'B/L NO.',
-        'CNEE. (ENTER)', 'CNEE. (MANIFEST)',
+        'CNEE. (ENTER)', 'CNEE. (MANIFEST)', 'TAX ID vs NOTIFY',
         'CNTRS NO. (ENTER)', 'CNTRS NO. (MANIFEST)',
         'STATUS (ENTER)', 'STATUS (MANIFEST)',
         'TOTAL PKG (ENTER)', 'PKG. (ENTER)',
@@ -800,10 +1313,30 @@ HEAD = ['สรุปผลเร่งด่วน', 'B/L NO.',
         'MARKS (ENTER)', 'MARKS (MANIFEST)',
         'DESC. (ENTER)', 'DESC. (MANIFEST)',
         'REEFER TEMP', 'DG', 'TRANSIT/TRANSHIPMENT',
+        'SHED NO.', 'ประเทศปลายทาง', 'CARGO MOVEMENT',
         'หมายเหตุ / จุดที่ไม่ตรงกัน']
 NC = len(HEAD)
-NUMCOL = {13, 14, 15, 16}    # G.W./MEAS. (ENTER+MANIFEST) = ชิดขวา ; ที่เหลือชิดซ้าย
-WIDE = {17, 18, 19, 20}      # MARKS / DESC. ให้กว้างอ่านได้เต็ม
+# เลขคอลัมน์ "เดิม" ที่ตรรกะการตรวจในฟังก์ชันนี้ใช้อ้างอิงตลอด (mk()/cs[...]/row เรียงตามนี้)
+COL_SHED, COL_DESTCODE, COL_MOVEMENT, COL_TAXID, COL_NOTE = 24, 25, 26, 27, 28
+# แม็ปเลขคอลัมน์เดิม -> ตำแหน่งจริงในชีต: 1-4 เท่าเดิม, TAX ID (เดิม 27) ย้ายมาเป็น 5, 5-26 เดิมเลื่อน
+# ขวาไป 1 ช่อง (6-27), 28 (หมายเหตุ) เท่าเดิม (นับสุทธิพอดีเพราะแทรก 1 ช่องแล้วก็ตัดออกไป 1 ช่อง)
+_OLD_TO_NEW = {1: 1, 2: 2, 3: 3, 4: 4, 27: 5, 28: 28}
+_OLD_TO_NEW.update({old: old + 1 for old in range(5, 27)})
+_NEW_TO_OLD = {v: k for k, v in _OLD_TO_NEW.items()}
+
+
+def _reorder(lst):
+    """เรียง list ที่ประกอบตามเลขคอลัมน์ 'เดิม' (ยาว NC) ให้เป็นลำดับ 'จริง' ตาม HEAD ก่อนเขียนลงชีต."""
+    return [lst[_NEW_TO_OLD[j] - 1] for j in range(1, NC + 1)]
+
+
+def _remap_cols(d):
+    """แปลง dict ที่ใช้เลขคอลัมน์ 'เดิม' เป็นคีย์ (เช่น cs, extra_ok) ให้เป็นเลขคอลัมน์ 'จริง'."""
+    return {_OLD_TO_NEW[k]: v for k, v in d.items()}
+
+
+NUMCOL = {_OLD_TO_NEW[c] for c in (13, 14, 15, 16)}   # G.W./MEAS. (ENTER+MANIFEST) = ชิดขวา
+WIDE = {_OLD_TO_NEW[c] for c in (17, 18, 19, 20)}     # MARKS / DESC. ให้กว้างอ่านได้เต็ม
 
 
 def build_report(MAN, ENT, vessel, man_declared, ent_declared, outpath):
@@ -828,7 +1361,8 @@ def build_report(MAN, ENT, vessel, man_declared, ent_declared, outpath):
     issue_rows = 0
     crit = []
     TOT = {'pe': 0, 'pm': 0, 'ge': 0.0, 'gm': 0.0, 'me': 0.0, 'mm': 0.0,
-           'pke': {}, 'pkm': {}, 'cte': {}, 'ctm': {}, 'st_bad': 0, 'transit': 0, 'dg': 0, 'reefer': 0}
+           'pke': {}, 'pkm': {}, 'cte': {}, 'ctm': {}, 'st_bad': 0, 'transit': 0, 'dg': 0, 'reefer': 0,
+           'shed_bad': 0, 'dest_bad': 0, 'mv_bad': 0, 'mv_review': 0, 'tax_bad': 0}
     sub = sorted(MAN, key=lambda b: (len(b), b))
 
     for bl in sub:
@@ -841,6 +1375,9 @@ def build_report(MAN, ENT, vessel, man_declared, ent_declared, outpath):
 
         if not e:
             _pm, _gm, _mm = pkgnum(m['pkg_hdr']), num(m['gw']), num(m['meas'])
+            xc = compute_extra_checks(m, None)
+            extra_notes = [xc[k]['note'] for k in ('shed', 'dest', 'mv', 'tax') if xc[k]['note']]
+            note_txt = 'ไม่พบ B/L นี้ในเอกสาร ENTER' + (' ; ' + ' ; '.join(extra_notes) if extra_notes else '')
             vals = [f'{WARN} ไม่มีเอกสาร ENTER เทียบ',
                     f'{WARN} {bl}', '—', m['cons'] or m['notify'], '—', ';'.join(m['cont']),
                     '—', canon_status(m['status']) or m['status'] or '(ว่าง)',
@@ -849,20 +1386,38 @@ def build_report(MAN, ENT, vessel, man_declared, ent_declared, outpath):
                     '—', f'{_mm:,.3f}' if _mm is not None else '-',
                     '—', m['marks'], '—', m['desc'], '-', '-',
                     extract_transit_phrase(m['transit']) or '-',
-                    'ไม่พบ B/L นี้ในเอกสาร ENTER']
+                    xc['shed']['text'], xc['dest']['text'], xc['mv']['text'], xc['tax']['text'],
+                    note_txt]
+            extra_ok = {COL_SHED: xc['shed']['ok'], COL_DESTCODE: xc['dest']['ok'],
+                        COL_MOVEMENT: xc['mv']['ok'], COL_TAXID: xc['tax']['ok']}
+            if xc['shed']['ok'] is False: TOT['shed_bad'] += 1
+            if xc['dest']['ok'] is False: TOT['dest_bad'] += 1
+            if xc['mv']['ok'] is False: TOT['mv_bad'] += 1
+            if xc['mv']['ok'] == 'review': TOT['mv_review'] += 1
+            if xc['tax']['ok'] is False: TOT['tax_bad'] += 1
+            vals = _reorder(vals)
+            extra_ok = _remap_cols(extra_ok)
             for j, v in enumerate(vals, 1):
                 c = ws.cell(r, j, v)
-                c.fill = f_yel
+                okx = extra_ok.get(j)
+                if okx is False:
+                    c.fill = f_red
+                elif okx == 'review':
+                    c.fill = f_org
+                else:
+                    c.fill = f_yel
                 c.border = BORD
-                c.font = F_bad if j in (1, 2, 24) else F_base
+                c.font = F_bad if (j in (1, 2, COL_NOTE) or okx in (False, 'review')) else F_base
                 c.alignment = Alignment(wrap_text=True, vertical='top',
-                                         horizontal=('right' if j in (13, 14, 15, 16) else 'left'))
+                                         horizontal=('right' if j in NUMCOL else 'left'))
             if _pm: TOT['pm'] += _pm
             if _gm: TOT['gm'] += _gm
             if _mm: TOT['mm'] += _mm
             r += 1
             issue_rows += 1
             crit.append(f'{bl}: ไม่มีเอกสาร ENTER')
+            if extra_notes:
+                crit.append(f'{bl}: ' + ' ; '.join(extra_notes))
             continue
 
         # CONSIGNEE (เทียบ ENTER กับ consignee + notify ของ MANIFEST)
@@ -1002,13 +1557,39 @@ def build_report(MAN, ENT, vessel, man_declared, ent_declared, outpath):
         else:
             mk(23, True)
 
+        # ── กฎเพิ่มเติม 4 ข้อ: SHED NO. / ประเทศปลายทาง / CARGO MOVEMENT / TAX ID vs NOTIFY ──
+        # ตรวจจากข้อมูลภายใน MANIFEST เองเป็นหลัก (ไม่ต้องพึ่ง ENTER) ยกเว้น CARGO MOVEMENT กรณีปลายทาง
+        # เป็นลาวที่ต้องเทียบกับ ENTER เท่านั้น (ดู check_movement())
+        xc = compute_extra_checks(m, e)
+        for col, key, tag in ((COL_SHED, 'shed', 'SHED'), (COL_DESTCODE, 'dest', 'ปลายทาง'),
+                               (COL_MOVEMENT, 'mv', 'MOVEMENT'), (COL_TAXID, 'tax', 'TAX ID')):
+            okx = xc[key]['ok']
+            if okx is None:
+                mk(col, True)
+            elif okx == 'review':
+                cs[col] = 'warn'
+                TOT['mv_review'] += 1
+                notes.append(xc[key]['note'])
+                urgent.append(f"{WARN} {tag} ต้องตรวจสอบด้วยคน")
+                crit.append(f"{bl}: {tag} ต้องตรวจสอบด้วยคน — {xc[key]['note']}")
+            else:
+                mk(col, okx)
+                if not okx:
+                    if key == 'shed': TOT['shed_bad'] += 1
+                    elif key == 'dest': TOT['dest_bad'] += 1
+                    elif key == 'mv': TOT['mv_bad'] += 1
+                    elif key == 'tax': TOT['tax_bad'] += 1
+                    notes.append(xc[key]['note'])
+                    urgent.append(f"{WARN} {tag} {xc[key]['text']}")
+                    crit.append(f"{bl}: {xc[key]['note']}")
+
         # เอกสาร ENTER ที่ parse ด้วย fallback ทั่วไป (layout ที่ไม่รู้จัก) หรือด้วย layout A/B ที่รู้จัก
         # แต่พบ anchor น้อยเกินกว่าจะเชื่อว่าเป็น layout หลักของทั้งฉบับจริง (low_confidence) แม่นยำน้อย
         # กว่ามาก — ลดระดับทุกจุดที่ไม่ตรงกัน (ยกเว้น DG/REEFER/TRANSIT ที่ต้องเตือนเสมอเมื่อพบคำเหล่านี้
         # ไม่ว่าจะมั่นใจแค่ไหน) จาก "แดง=ผิดแน่นอน" เป็น "ส้ม=ต้องตรวจสอบด้วยคน" แทน
         if e.get('generic_layout') or e.get('low_confidence'):
             for c in list(cs):
-                if cs[c] == 'diff' and c not in (21, 22, 23):
+                if cs[c] == 'diff' and c not in (21, 22, 23, COL_SHED, COL_DESTCODE, COL_TAXID):
                     cs[c] = 'warn'
             notes.append('ENTER เอกสารนี้ดึงข้อมูลด้วยความมั่นใจต่ำ (layout ไม่ชัดเจน/พบ anchor น้อยเกินไป) — '
                           'ตรวจสอบทุกช่องที่ไฮไลต์ส้มด้วยคน')
@@ -1020,9 +1601,13 @@ def build_report(MAN, ENT, vessel, man_declared, ent_declared, outpath):
         LBL = {3: 'CONSIGNEE', 4: 'CONSIGNEE', 5: 'CONTAINER', 6: 'CONTAINER', 7: 'STATUS', 8: 'STATUS',
                9: 'PACKAGE', 11: 'PACKAGE', 10: 'PACKAGING', 12: 'PACKAGING', 13: 'G.W.', 14: 'G.W.',
                15: 'MEAS.', 16: 'MEAS.', 17: 'MARKS', 18: 'MARKS', 19: 'DESC', 20: 'DESC',
-               21: 'REEFER', 22: 'DG', 23: 'TRANSIT'}
+               21: 'REEFER', 22: 'DG', 23: 'TRANSIT',
+               COL_SHED: 'SHED', COL_DESTCODE: 'ปลายทาง', COL_MOVEMENT: 'MOVEMENT', COL_TAXID: 'TAX ID'}
+        # REEFER/DG/TRANSIT และ 4 คอลัมน์ใหม่ (SHED/ปลายทาง/MOVEMENT/TAX ID) ผูก urgent.append() ของตัวเอง
+        # ไว้แล้วข้างบน (มีรายละเอียดมากกว่าป้ายชื่อคอลัมน์เฉย ๆ) ตัดออกจาก tags/wtags กันข้อความซ้ำ
+        _OWN_URGENT = (21, 22, 23, COL_SHED, COL_DESTCODE, COL_MOVEMENT, COL_TAXID)
         if diff:
-            tags = sorted({LBL[c] for c in diff if c not in (21, 22, 23)})
+            tags = sorted({LBL[c] for c in diff if c not in _OWN_URGENT})
             if tags:
                 urgent.insert(0, f"{WARN} ไม่ตรง: " + ', '.join(tags))
                 crit.append(f"{bl}: ไม่ตรง " + ', '.join(tags))
@@ -1030,7 +1615,7 @@ def build_report(MAN, ENT, vessel, man_declared, ent_declared, outpath):
             # ไม่มีจุดที่ฟันธงว่าผิด (แดง) แต่มีจุดที่ต้องให้คนยืนยัน (ส้ม เช่น ดึงข้อมูลด้วยความมั่นใจ
             # ต่ำ) — ห้ามให้คอลัมน์สรุปผลเร่งด่วนขึ้นว่า "ผ่าน" เฉย ๆ ไม่งั้นคนตรวจจะข้ามแถวนี้ไปทั้งที่
             # ยังมีช่องส้มให้ตรวจอยู่
-            wtags = sorted({LBL[c] for c in warn_cols if c in LBL})
+            wtags = sorted({LBL[c] for c in warn_cols if c in LBL and c not in _OWN_URGENT})
             urgent.insert(0, f"{WARN} ต้องตรวจสอบ: " + ', '.join(wtags) if wtags else f'{WARN} ต้องตรวจสอบด้วยคน')
         if urgent and not urgent[0].startswith(WARN):
             urgent[0] = f'{WARN} {urgent[0]}'
@@ -1058,7 +1643,12 @@ def build_report(MAN, ENT, vessel, man_declared, ent_declared, outpath):
                e['marks'], m['marks'],
                e['desc'], m['desc'],
                reefer, dg, transit_disp,
+               xc['shed']['text'], xc['dest']['text'], xc['mv']['text'], xc['tax']['text'],
                ' ; '.join(notes) if notes else '-']
+        # สลับลำดับคอลัมน์จาก "เดิม" (ที่ใช้อ้างอิงในตรรกะข้างบนทั้งหมด) เป็นลำดับ "จริง" ตาม HEAD —
+        # ดูคอมเมนต์ตรง _OLD_TO_NEW ด้านบนไฟล์
+        row = _reorder(row)
+        cs = _remap_cols(cs)
         has_diff = bool(diff)
         has_warn = any(s == 'warn' for s in cs.values())
         for j, v in enumerate(row, 1):
@@ -1076,7 +1666,7 @@ def build_report(MAN, ENT, vessel, man_declared, ent_declared, outpath):
                     c.font = F_bad; c.fill = f_org
                 else:
                     c.font = Font(name=FN, size=FS, bold=True, color='006100'); c.fill = f_grn
-            if j == 24:
+            if j == COL_NOTE:
                 c.font = F_bad if (has_diff or has_warn) else F_base
                 c.fill = f_red if has_diff else (f_org if has_warn else f_ok)
                 if v in (None, '-', ''):
@@ -1117,7 +1707,9 @@ def build_report(MAN, ENT, vessel, man_declared, ent_declared, outpath):
                 e['marks'], '—', e['desc'], '—',
                 e['reefer'] or '-', e['dg'] or '-',
                 extract_transit_phrase(e['transit_raw']) or '-',
+                '—', '—', '—', '—',
                 note]
+        vals = _reorder(vals)
         fill = f_org if is_generic else f_red
         for j, v in enumerate(vals, 1):
             c = ws.cell(r, j, v)
@@ -1125,7 +1717,7 @@ def build_report(MAN, ENT, vessel, man_declared, ent_declared, outpath):
             c.border = BORD
             c.font = F_bad
             c.alignment = Alignment(wrap_text=True, vertical='top',
-                                     horizontal=('right' if j in (13, 14, 15, 16) else 'left'))
+                                     horizontal=('right' if j in NUMCOL else 'left'))
         if pe: TOT['pe'] += pe
         if ge: TOT['ge'] += ge
         if me_: TOT['me'] += me_
@@ -1144,7 +1736,8 @@ def build_report(MAN, ENT, vessel, man_declared, ent_declared, outpath):
     _ct = lambda dd: ', '.join(sorted(dd)) or '-'          # ตู้เหมือนกันนับเป็น 1
     na = len(sub)
     _all_ok = (pe_ok and ge_ok and me_ok and not TOT['st_bad'] and not TOT['transit']
-               and not TOT['dg'] and not TOT['reefer'])
+               and not TOT['dg'] and not TOT['reefer'] and not TOT['shed_bad'] and not TOT['dest_bad']
+               and not TOT['mv_bad'] and not TOT['mv_review'] and not TOT['tax_bad'])
 
     decl_bits = []
     if ent_declared:
@@ -1168,8 +1761,12 @@ def build_report(MAN, ENT, vessel, man_declared, ent_declared, outpath):
             f"{TOT['me']:,.3f}", f"{TOT['mm']:,.3f}",
             '', '', '', '',
             f"{TOT['reefer']} B/L", f"{TOT['dg']} B/L", f"{TOT['transit']} B/L",
+            f"SHED ไม่ตรง {TOT['shed_bad']} B/L", f"ปลายทางไม่ตรง {TOT['dest_bad']} B/L",
+            f"MOVEMENT ไม่ตรง {TOT['mv_bad']} / ต้องตรวจ {TOT['mv_review']} B/L",
+            f"TAX ID ไม่ตรง {TOT['tax_bad']} B/L",
             (decl_txt + f"ตรวจยอดรวมจากรายการข้างบน: PACKAGE {'ตรง' if pe_ok else 'ไม่ตรง'}, "
                         f"GROSS WEIGHT {'ตรง' if ge_ok else 'ไม่ตรง'}, MEASUREMENT {'ตรง' if me_ok else 'ไม่ตรง'}")]
+    trow = _reorder(trow)
     topb = Border(left=thin, right=thin, bottom=thin, top=Side(style='medium', color=NAVY))
     for j, v in enumerate(trow, 1):
         c = ws.cell(r, j, v)
@@ -1182,20 +1779,25 @@ def build_report(MAN, ENT, vessel, man_declared, ent_declared, outpath):
             c.font = Font(name=FN, size=FS, bold=True); c.fill = f_ok
     for cols, ok in ((9, pe_ok), (11, pe_ok), (13, ge_ok), (14, ge_ok), (15, me_ok), (16, me_ok)):
         if not ok:
-            cc = ws.cell(r, cols)
+            cc = ws.cell(r, _OLD_TO_NEW[cols])
             cc.fill = f_red; cc.font = Font(name=FN, size=FS, bold=True, color=DKRED)
             if not str(cc.value).startswith(WARN): cc.value = f'{WARN} {cc.value}'
     if TOT['st_bad']:
-        for cc in (ws.cell(r, 7), ws.cell(r, 8)):
+        for cc in (ws.cell(r, _OLD_TO_NEW[7]), ws.cell(r, _OLD_TO_NEW[8])):
             cc.fill = f_red; cc.font = Font(name=FN, size=FS, bold=True, color=DKRED); cc.value = f'{WARN} {cc.value}'
-    for cc, cnt in ((ws.cell(r, 21), TOT['reefer']), (ws.cell(r, 22), TOT['dg']), (ws.cell(r, 23), TOT['transit'])):
+    for cc, cnt in ((ws.cell(r, _OLD_TO_NEW[21]), TOT['reefer']), (ws.cell(r, _OLD_TO_NEW[22]), TOT['dg']),
+                    (ws.cell(r, _OLD_TO_NEW[23]), TOT['transit']),
+                    (ws.cell(r, _OLD_TO_NEW[COL_SHED]), TOT['shed_bad']),
+                    (ws.cell(r, _OLD_TO_NEW[COL_DESTCODE]), TOT['dest_bad']),
+                    (ws.cell(r, _OLD_TO_NEW[COL_MOVEMENT]), TOT['mv_bad'] + TOT['mv_review']),
+                    (ws.cell(r, _OLD_TO_NEW[COL_TAXID]), TOT['tax_bad'])):
         if cnt:
             cc.fill = f_red; cc.font = Font(name=FN, size=FS, bold=True, color=DKRED); cc.value = f'{WARN} {cc.value}'
     ws.cell(r, 1).fill = f_grn if _all_ok else f_red
     ws.cell(r, 1).font = Font(name=FN, size=FS, bold=True, color=('006100' if _all_ok else DKRED))
     if not (pe_ok and ge_ok and me_ok):
-        ws.cell(r, 24).fill = f_red
-        ws.cell(r, 24).font = Font(name=FN, size=FS, bold=True, color=DKRED)
+        ws.cell(r, COL_NOTE).fill = f_red
+        ws.cell(r, COL_NOTE).font = Font(name=FN, size=FS, bold=True, color=DKRED)
     ws.row_dimensions[r].height = 99
     r += 1
 
@@ -1206,7 +1808,12 @@ def build_report(MAN, ENT, vessel, man_declared, ent_declared, outpath):
     c2.alignment = Alignment(wrap_text=True, vertical='center')
     c3 = ws.cell(3, 1, "สี: ขาว=ไม่ผิด | เขียว=ผ่าน (ช่องสรุป) | แดง ⚠=ไม่ตรง/จุดเร่งด่วน | ส้ม=ต้องยืนยัน | "
                         "เหลือง=ไม่มี ENTER เทียบ    ||    "
-                        "STATUS: CY,CY/CY,FCL,ลากตู้=CY ; LCL,ขน(ส่ง)=LCL ; CFS,LCL/CFS,เปิดตู้=LCL/CFS")
+                        "STATUS: CY,CY/CY,FCL,ลากตู้=CY ; LCL,ขน(ส่ง)=LCL ; CFS,LCL/CFS,เปิดตู้=LCL/CFS    ||    "
+                        + (f"SHED NO.: ต้องเป็น {EXPECTED_SHED} ทุก B/L (ตรง = -) ยกเว้น LAOS=0124 "
+                           "(DISCHARGE BANGKOK)    ||    " if EXPECTED_SHED else
+                           "SHED NO.: USED ENGINE/LAOS=0126/0124 (เฉพาะ DISCHARGE BANGKOK), DG=2826 (เฉพาะ LAEM "
+                           "CHABANG), THLKR/BMT/SCT/UNITHAI=0332/0110/0302/0113    ||    ") +
+                        "CARGO MOVEMENT: TRANSIT ต้องเป็น (7-TRANSIT) เสมอ ยกเว้นไปลาวต้องตรงกับ ENTER เท่านั้น")
     c3.font = Font(name=FN, size=FS, bold=True, color=DKRED)         # แถวที่ 3 = สีแดง
     c3.alignment = Alignment(wrap_text=True, vertical='center')
     ws.row_dimensions[2].height = 18
@@ -1221,7 +1828,9 @@ def build_report(MAN, ENT, vessel, man_declared, ent_declared, outpath):
         ws.row_dimensions[rr].height = 26
     wb.save(outpath)
     return {'bl': len(sub), 'issue_rows': issue_rows, 'st_bad': TOT['st_bad'],
-            'transit': TOT['transit'], 'dg': TOT['dg'], 'reefer': TOT['reefer'], 'crit': crit}
+            'transit': TOT['transit'], 'dg': TOT['dg'], 'reefer': TOT['reefer'],
+            'shed_bad': TOT['shed_bad'], 'dest_bad': TOT['dest_bad'],
+            'mv_bad': TOT['mv_bad'], 'mv_review': TOT['mv_review'], 'tax_bad': TOT['tax_bad'], 'crit': crit}
 
 
 # ═══════════════════════════ main ═══════════════════════════
@@ -1244,7 +1853,11 @@ def main(argv=None):
     ap.add_argument('--enter', default=None, help='พาธไฟล์ ENTER .pdf (ค่าเริ่มต้น: หาให้อัตโนมัติ)')
     ap.add_argument('--indir', default='.', help='โฟลเดอร์ที่ใช้หาไฟล์อัตโนมัติ (ค่าเริ่มต้น: โฟลเดอร์ปัจจุบัน)')
     ap.add_argument('--outdir', default=None, help='โฟลเดอร์ผลลัพธ์ (ค่าเริ่มต้น: โฟลเดอร์เดียวกับ --indir)')
+    ap.add_argument('--shed', default='', help='SHED NO. ที่ต้องเป็นสำหรับงานนี้ เช่น 0141 (ทุก B/L ยกเว้น LAOS)')
     a = ap.parse_args(argv)
+    global EXPECTED_SHED
+    ms = re.search(r'\d{3,4}', a.shed or '')
+    EXPECTED_SHED = ms.group(0).zfill(4) if ms else ''
 
     indir = a.indir
     search_dirs = [os.path.join(indir, 'input'), indir]
@@ -1266,6 +1879,16 @@ def main(argv=None):
     MAN, vessel, man_declared, bl_re = parse_manifest(manifest)
     ENT, ent_declared = parse_enter(enter, bl_re)
 
+    # MANIFEST บางรายการพิมพ์จำนวน/ชนิดหีบห่อเดิมซ้ำไว้ในวงเล็บต้น DESCRIPTION ('(2 WOODEN CASES) ...')
+    # ซึ่งฝั่ง ENTER อยู่ในคอลัมน์ QUANTITY — ถ้าตรงกับ QUANTITY ของ ENTER พอดี ให้เติมวงเล็บเดียวกันนำหน้า
+    # DESC ของ ENTER เพื่อไม่ให้ถูกนับเป็น DESCRIPTION ไม่ตรง
+    _n = lambda s: re.sub(r'[^A-Z0-9]', '', str(s).upper())
+    for bl, e in ENT.items():
+        mm = re.match(r'^(\([^()]*\))\s*', (MAN.get(bl) or {}).get('desc') or '')
+        if mm and e.get('pkgs') and _n(mm.group(1)) == _n(f"{e['pkgs']}{e.get('pkgtype', '')}") \
+                and not (e.get('desc') or '').startswith('('):
+            e['desc'] = f"{mm.group(1)} {e.get('desc') or ''}".strip()
+
     if not MAN:
         sys.exit('!! อ่าน B/L จาก MANIFEST ไม่ได้เลย — ตรวจว่ารูปแบบไฟล์ตรงกับที่ parse_manifest() คาดไว้หรือไม่')
 
@@ -1275,6 +1898,9 @@ def main(argv=None):
     print(f'บันทึกแล้ว: {outpath}')
     print(f'B/L ทั้งหมด {stats["bl"]} | จุดต้องตรวจ {stats["issue_rows"]} แถว | '
           f'STATUS ไม่ตรง {stats["st_bad"]} | DG {stats["dg"]} | REEFER {stats["reefer"]} | TRANSIT {stats["transit"]}')
+    print(f'SHED NO. ไม่ตรง {stats["shed_bad"]} | ประเทศปลายทาง ไม่ตรง {stats["dest_bad"]} | '
+          f'CARGO MOVEMENT ไม่ตรง {stats["mv_bad"]} (ต้องตรวจ ENTER {stats["mv_review"]}) | '
+          f'TAX ID ไม่ตรง NOTIFY {stats["tax_bad"]}')
     missing = [b for b in MAN if b not in ENT]
     if missing:
         print(f'⚠️  B/L ที่ไม่มีเอกสาร ENTER เทียบ ({len(missing)}): {", ".join(missing)}')

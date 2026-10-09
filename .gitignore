@@ -1,5 +1,15 @@
+# ข้อมูลลูกค้าจริง (MANIFEST/ENTER/CNTRS/EDI ที่สร้างขึ้น) ห้ามขึ้น GitHub
 input/
 output/
+*.xls
+*.xlsx
+*.pdf
+
+# Python
 __pycache__/
 *.pyc
+.venv/
+venv/
+
+# ไฟล์ขยะจากเชลล์
 nul
