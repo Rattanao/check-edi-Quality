@@ -296,7 +296,7 @@
           if (DG_RE.test(c10) || REEFER_RE.test(c10)) rec.desc.push(c10);
           else if (transitOpen || TRANSIT_RE.test(u)) { rec.transit = (rec.transit + " " + c10).trim(); transitOpen = true; rec.desc.push(c10); }
           else if (ST_TOK.includes(u) && !rec.status) rec.status = c10;
-          else if (/^\d{0,2}[A-Z]\d[A-Z0-9]/.test(u) || u.includes("PART CNTR") || /^[\d,]+\s*(PK|CS|PX|CT|BX|SX|BE|DR|RO|BG)\b/.test(u)) { /* โครงสร้าง */ }
+          else if (/^\d{0,2}[A-Z]\d[A-Z0-9]{1,3}(?:\s|$)/.test(u) || u.includes("PART CNTR") || /^[\d,]+\s*(PK|CS|PX|CT|BX|SX|BE|DR|RO|BG)\b/.test(u)) { /* โครงสร้าง */ }
           else rec.desc.push(c10);
         }
         const c16 = cell(rows[j], 16);
@@ -333,7 +333,9 @@
   function isQualityAmendment(pages) {
     const all = pages.flatMap(pg => pg.items.map(it => it.t));
     if (all.some(t => /B\s*\/\s*L\s*CHANGE\s*NO/i.test(t))) return false;
-    const has = re => all.some(t => re.test(t));
+    // ป้ายอาจถูก pdf.js แตกเป็นหลายคำ ('B/L' + 'NO.:') จึงตรวจจาก "ท่อนของแถว" ที่รวมคำชิดกันแล้ว ไม่ใช่ทีละ item
+    const segs = buildRows(pages).flatMap(r => r.segs.map(s => s.t));
+    const has = re => segs.some(t => re.test(t));
     return has(LBL_BL) && has(LBL_CONT) && has(LBL_CONS) && has(/KGS$/i);
   }
 
@@ -342,7 +344,7 @@
     const rows = [];
     pages.forEach((pg, p) => {
       const items = pg.items.filter(it => it.t && !PAGELN.test(it.t)).sort((a, b) => a.y - b.y || a.x - b.x);
-      const lbl = items.filter(it => it.x < 200 && (LBL_BL.test(it.t) || LBL_CONT.test(it.t) || LBL_CONS.test(it.t))).map(it => it.x);
+      const lbl = items.filter(it => it.x < 250 && (LBL_BL.test(it.t) || /^B\s*\/\s*L$/i.test(it.t) || LBL_CONT.test(it.t) || LBL_CONS.test(it.t))).map(it => it.x);
       pg.lx = lbl.length ? Math.min(...lbl) : null;
       let cur = null;
       for (const it of items) {
@@ -372,7 +374,7 @@
     // anchor = แถวที่มีป้าย 'B/L NO.:' และเลข B/L ในแถวเดียวกัน
     const anchors = [];
     rows.forEach((r, ri) => {
-      if (!r.items.some(it => LBL_BL.test(it.t))) return;
+      if (!r.segs.some(s => LBL_BL.test(s.t))) return;
       const v = r.items.find(it => blRe.test(it.t));
       if (v) anchors.push({ bl: v.t, ri, p: r.p, y: r.y });
     });
