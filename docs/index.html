@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Check EDI Quality</title>
+<link rel="icon" href="assets/hal-logo.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@400;600;700&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -18,7 +19,9 @@
   * { box-sizing: border-box; }
   body { margin: 0; font-family: "Sarabun", Tahoma, sans-serif; background: var(--bg); color: var(--text); }
   header { background: var(--navy); color: #fff; padding: 18px 16px; }
-  header .wrap { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
+  header .wrap { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+  header .brand { background: #fff; border-radius: 6px; padding: 5px 10px; display: inline-flex; line-height: 0; flex: 0 0 auto; }
+  header .brand img { height: 30px; width: auto; display: block; }
   header h1 { margin: 0; font-size: 26px; letter-spacing: 1px; }
   header p { margin: 0; opacity: .8; font-size: 15px; }
   .wrap { max-width: 1400px; margin: 0 auto; }
@@ -80,7 +83,7 @@
 </style>
 </head>
 <body>
-<header><div class="wrap"><h1>CHECK EDI QUALITY</h1><p>ตรวจเทียบ MANIFEST กับ ENTER (ฟอร์ม AMENDMENT ของ Quality):CONSIGNEE · CNTR · STATUS · PKG · G.W. · MEAS. · MARKS · DESC · DG · TRANSIT</p></div></header>
+<header><div class="wrap"><span class="brand"><img src="assets/hal-logo.png" alt="Heung A Line"></span><h1>CHECK EDI QUALITY</h1><p>ตรวจเทียบ MANIFEST กับ ENTER (ฟอร์ม AMENDMENT ของ Quality):CONSIGNEE · CNTR · STATUS · PKG · G.W. · MEAS. · MARKS · DESC · DG · TRANSIT</p></div></header>
 
 <main class="wrap">
   <section class="card">
