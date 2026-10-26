@@ -192,7 +192,7 @@ function renderResult() {
     `<div class="k">CONTAINER</div><div>${esc(conts.join(", ") || "-")}</div>`;
   $("chips").innerHTML =
     `<span class="chip all">ทั้งหมด ${count} B/L</span><span class="chip bad">⚠ ต้องตรวจ ${issueRows}</span><span class="chip ok">✔ ผ่าน ${count - issueRows}</span>` +
-    (total.cells.urgent.s === "grn" ? `<span class="chip ok">ยอดรวมตรงกัน</span>` : `<span class="chip bad">⚠ ยอดรวมไม่ตรง</span>`);
+    (report.stats.totalsOk ? `<span class="chip ok">ยอดรวมตรงกัน</span>` : `<span class="chip bad">⚠ ยอดรวมไม่ตรง</span>`);
   $("thead").innerHTML = "<tr>" + C.HEADERS.map((h, i) => `<th class="${i < 2 ? "s" + i : ""}">${esc(h)}</th>`).join("") + "</tr>";
   drawRows();
   $("result").classList.remove("hidden");
@@ -241,7 +241,7 @@ async function download() {
     "STATUS: CY,CY/CY,FCL,ลากตู้=CY ; LCL,ขน(ส่ง)=LCL ; CFS,LCL/CFS,เปิดตู้=LCL/CFS    ||    " +
     (report.expectedShed ? `SHED NO.: ต้องเป็น ${report.expectedShed} ทุก B/L (ตรง = -) ยกเว้น LAOS=0124 (DISCHARGE BANGKOK)    ||    `
       : "SHED NO.: USED ENGINE/LAOS=0126/0124 (เฉพาะ DISCHARGE BANGKOK), DG=2826 (เฉพาะ LAEM CHABANG), THLKR/BMT/SCT/UNITHAI=0332/0110/0302/0113    ||    ") +
-    "CARGO MOVEMENT: TRANSIT ต้องเป็น (7-TRANSIT) เสมอ ยกเว้นไปลาวต้องตรงกับ ENTER เท่านั้น";
+    "CARGO MOVEMENT: TRANSHIPMENT ต้องเป็น (3-TRANSHIPMENT) เสมอ ; TRANSIT ต้องเป็น (7-TRANSIT) เสมอ ยกเว้นไปลาวต้องตรงกับ ENTER เท่านั้น";
   c3.font = { name: FN, size: FS, bold: true, color: { argb: "FFB00000" } };
   c3.alignment = { wrapText: true, vertical: "middle" };
   ws.getRow(2).height = 18; ws.getRow(3).height = 32; ws.getRow(4).height = 30;
