@@ -265,7 +265,7 @@ def canon_pkg(s):
     for w in ('WOODEN CASE', 'PALLET', 'CARTON', 'PACKAGE', 'CASE', 'BOX', 'SET', 'DRUM',
               'ROLL', 'BAG', 'BALE', 'CRATE', 'UNIT', 'PIECE', 'SKID', 'BUNDLE'):
         if w in u:
-            return 'CASE' if w == 'WOODEN CASE' else w
+            return w   # WOODEN CASE ≠ CASE — ลังไม้กับ CASE ไม่ใช่ชนิดเดียวกัน ต้องแจ้งไม่ตรง
     m = re.match(r'^\s*[\d,]*\s*([A-Z]{2,3})\b', u)
     if m and m.group(1) in PKG_KIND:
         return PKG_KIND[m.group(1)]
@@ -1363,6 +1363,13 @@ def build_report(MAN, ENT, vessel, man_declared, ent_declared, outpath):
     TOT = {'pe': 0, 'pm': 0, 'ge': 0.0, 'gm': 0.0, 'me': 0.0, 'mm': 0.0,
            'pke': {}, 'pkm': {}, 'cte': {}, 'ctm': {}, 'st_bad': 0, 'transit': 0, 'dg': 0, 'reefer': 0,
            'shed_bad': 0, 'dest_bad': 0, 'mv_bad': 0, 'mv_review': 0, 'tax_bad': 0}
+    # กฎ: แจ้งผลเฉพาะ B/L ที่มีใน ENTER — B/L อื่นของ M/F ทั้งลำเรือไม่ลงผล และไม่ใช้ GRAND TOTAL ทั้งลำ
+    # (B/L ที่มีใน ENTER แต่ไม่มีใน MANIFEST ยังแจ้งวิกฤตเหมือนเดิม)
+    _skipped_mf = [b for b in MAN if b not in ENT]
+    if _skipped_mf:
+        MAN = {b: r for b, r in MAN.items() if b in ENT}
+        man_declared = None
+        print(f'ไม่ลงผล B/L ของ MANIFEST ที่ไม่มีใน ENTER {len(_skipped_mf)} B/L')
     sub = sorted(MAN, key=lambda b: (len(b), b))
 
     for bl in sub:
@@ -1462,7 +1469,7 @@ def build_report(MAN, ENT, vessel, man_declared, ent_declared, outpath):
 
         # PACKAGING (ชนิดบรรจุภัณฑ์)
         ke, km = canon_pkg(e['pkgtype']), canon_pkg(m['pkg_hdr'])
-        pg_ok = bool(ke and km and (ke == km or ke in km or km in ke))
+        pg_ok = bool(ke and km and (ke == km or ((ke in km or km in ke) and ('WOODEN' in ke) == ('WOODEN' in km))))
         mk(10, pg_ok); mk(12, pg_ok)
         if not pg_ok:
             notes.append(f"PACKAGING ไม่ตรง (ENTER {ke or e['pkgtype'] or '-'} / "
